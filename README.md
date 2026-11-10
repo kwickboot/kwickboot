@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://kwickboot.com">
+    <img src="https://kwickboot.com/assets/img/kwickboot-logo.png" alt="KwickBoot" width="680">
+  </a>
+</p>
+
 # KwickBoot
 
 KwickBoot is a self-hosted network-boot server. PCs boot a small RAM OS from it over the network, report their
