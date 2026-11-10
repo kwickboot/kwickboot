@@ -2,9 +2,9 @@
 
 ## Current status
 
-KwickBoot has submitted an application for free open-source code signing through SignPath Foundation and is awaiting
-review. Until the application is approved and the signing workflow is active, Windows releases are unsigned. Verify
-current downloads with the published SHA-256 checksums and detached release signature.
+KwickBoot's initial application for free open-source code signing through SignPath Foundation was not approved because
+the new project does not yet have the public adoption signals required by the Foundation program. Windows releases
+remain unsigned. Verify current downloads with the published SHA-256 checksums and detached release signature.
 
 ## Scope
 
@@ -26,8 +26,8 @@ after the trusted build completes. A signed artifact must be traceable to a publ
 - If a release is suspected of compromise, it is removed while the incident is investigated and the signing provider
   is notified when certificate revocation may be required.
 
-If SignPath Foundation approves the project, signed releases will identify **SignPath Foundation** as the Windows
-publisher. The policy will then be updated to record the active signing status and trusted-build configuration.
+If a trusted signing provider approves the project, this policy will be updated to identify the provider, publisher
+name and active trusted-build configuration before signed releases are published.
 
 ## Privacy
 
