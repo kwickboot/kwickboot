@@ -1,0 +1,12 @@
+[Unit]
+Description=KwickBoot: network cards ready for large transfers (ring buffers, offloads)
+After=systemd-networkd.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kwickboot-nic-tune
+
+[Install]
+WantedBy=multi-user.target

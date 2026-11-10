@@ -1,0 +1,80 @@
+#!/bin/sh
+# KwickBoot installer ISO: init (replaces Core's /init when the ISO's second initrd is loaded - GRUB "initrd A B").
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Same start as KwickBoot Core (drivers from RAM), then: find the ISO, serve its files on 127.0.0.1 and run the
+# installer on the screen. Nothing is written anywhere until the installer's typed confirmations.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev; mkdir -p /dev/pts /run /iso
+mount -t devpts devpts /dev/pts; mount -t tmpfs run /run
+hostname kwickboot-installer
+exec </dev/tty1 >/dev/tty1 2>&1
+echo "KwickBoot installer: starting (drivers)..."
+# the packs' real tools replace BusyBox applets of the same name (GNU tar, mount, ...), as the agent does on PXE
+for f in /usr/bin/* /usr/sbin/*; do b=${f##*/}; [ -L /bin/$b ] && [ "$(readlink /bin/$b)" = busybox ] && ln -sf "$f" /bin/$b; done
+# the packs' drivers are in this initrd: index them, then load what the hardware asks for (repeat until stable)
+depmod 2>/dev/null
+echo '$MODALIAS=.* 0:0 660 @modprobe -q -b "$MODALIAS"' > /etc/mdev.conf
+echo /sbin/modprobe > /proc/sys/kernel/modprobe
+for m in loop squashfs isofs sr_mod sd_mod usb-storage uas nvme ahci xhci_pci ehci_pci vfat exfat nls_cp437 nls_iso8859-1 nls_utf8 ext4; do modprobe -q $m 2>/dev/null; done
+n0=-1; for pass in 1 2 3 4 5 6; do
+  for a in $(cat /sys/bus/*/devices/*/modalias 2>/dev/null | sort -u); do modprobe -q "$a" 2>/dev/null; done
+  mdev -s 2>/dev/null
+  n=$(wc -l < /proc/modules); [ "$n" = "$n0" ] && [ $pass -gt 2 ] && break; n0=$n; sleep 1
+done
+mdev -d 2>/dev/null
+modprobe -q efivarfs 2>/dev/null; mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null   # after the drivers (Secure Boot state, boot entries)
+# the ISO itself: the file system labelled KWICKBOOT (USB stick, DVD or virtual CD; on a KwickBoot USB Creator stick the
+# FAT32 boot partition) - USB sticks can take a few seconds
+# Network-booted as a tool (wipe / rescue from the KwickBoot server: kb_tool= + kb_server=): no medium needed.
+KB_SERVER=$(sed -n 's/.*kb_server=\([^ ]*\).*/\1/p' /proc/cmdline); export KB_SERVER
+tries=20; grep -qw 'kb_tool=[a-z]*' /proc/cmdline && [ -n "$KB_SERVER" ] && tries=2
+for i in $(seq 1 $tries); do
+  dev=$(blkid -l -t LABEL=KWICKBOOT -o device 2>/dev/null)
+  [ -n "$dev" ] && mount -o ro -t "$(blkid -o value -s TYPE "$dev")" "$dev" /iso 2>/dev/null && break
+  mdev -s 2>/dev/null; sleep 1
+done
+if ! [ -f /iso/.disk/kwickboot ] && [ -n "$KB_SERVER" ] && grep -qw 'kb_tool=[a-z]*' /proc/cmdline; then
+  echo "KwickBoot: network-booted from $KB_SERVER (no USB stick needed)."
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$n" up; done; sleep 2
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && udhcpc -i "$n" -q -n -t 6 >/dev/null 2>&1 && break; done
+elif ! [ -f /iso/.disk/kwickboot ]; then
+  echo; echo "The KwickBoot ISO was not found (no device labelled KWICKBOOT)."
+  echo "Write the ISO to the USB stick in DD / raw mode, or attach it as a CD/DVD, and start again."
+  while :; do sleep 3600; done
+fi
+echo "$dev" > /run/kb-iso-dev
+# KwickBoot USB Creator stick: the exFAT data partition (KWICKDATA) with kwickboot.cfg (answers for the installer) and iso/
+# (ISOs copied into the new server's library). Read-only; only known keys with plain values are taken (never sourced).
+mkdir -p /kbdata
+kd=$(blkid -l -t LABEL=KWICKDATA -o device 2>/dev/null)
+if [ -n "$kd" ] && mount -o ro -t "$(blkid -o value -s TYPE "$kd")" "$kd" /kbdata 2>/dev/null; then
+  echo "$kd" > /run/kb-data-dev
+  [ -f /kbdata/kwickboot.cfg ] && tr -d '\r' < /kbdata/kwickboot.cfg | sed 's/[[:space:]]*$//' | \
+    grep -E '^(start|host|timezone|network|address|gateway|dns|disk|test_lab|import_isos)=[A-Za-z0-9._/:+ ,-]*$' > /run/kb-stick.conf
+fi
+# stick tools (menu): secure wipe, rescue shell - the RAM OS only, no server
+for t in wipe rescue; do grep -qw "kb_tool=$t" /proc/cmdline || continue
+  ( while :; do setsid -c /bin/sh -l <> /dev/tty2 >&0 2>&1; sleep 1; done ) &
+  while :; do sh /bin/kb-tools $t; echo; echo "Press Enter to run it again, or switch the PC off."; read x; done
+done
+# run (default) or install: the menu entry decides (kb_install=1 / kb_live=1); the plain entry follows kwickboot.cfg start=
+MODE=live
+grep -qw kb_install=1 /proc/cmdline && MODE=install
+grep -qw kb_live=1 /proc/cmdline || { [ "$(sed -n 's/^start=//p' /run/kb-stick.conf 2>/dev/null)" = install ] && MODE=install; }
+if [ "$MODE" = live ]; then
+  if sh /bin/kb-live; then
+    umount /kbdata 2>/dev/null; umount /iso
+    for m in dev proc sys run; do mkdir -p /newroot/$m; mount --move /$m /newroot/$m; done
+    exec switch_root /newroot /sbin/init
+  fi
+  umount /newroot 2>/dev/null
+  echo; echo "KwickBoot live could not start (messages above) - the installer starts instead."; sleep 5
+fi
+# loopback (the RAM OS has none by default) + the ISO's files on http://127.0.0.1:8080 for the unchanged install engine
+ip link set lo up; ip addr add 127.0.0.1/8 dev lo 2>/dev/null
+httpd -p 127.0.0.1:8080 -h /iso/http
+# network cards up (the installer offers DHCP or a static address for the installed server)
+for i in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$i" up; done
+# a second console for IT (Alt+F2): the installer is interactive anyway
+( while :; do setsid -c /bin/sh -l <> /dev/tty2 >&0 2>&1; sleep 1; done ) &
+while :; do sh /bin/kb-installer; echo; echo "Press Enter to start the installer again."; read x; done

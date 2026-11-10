@@ -1,0 +1,12 @@
+[Unit]
+Description=KwickBoot: unattended TrueNAS install (iXsystems installer API)
+Wants=network-online.target
+After=network-online.target truenas-installer.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kb-truenas-install
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

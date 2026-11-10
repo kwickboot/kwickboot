@@ -1,0 +1,191 @@
+#!/usr/bin/python3
+"""kwickboot-kiosk - the KwickBoot local screen: Chromium in kiosk mode, watched.
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+Started from ~/.xinitrc of the auto-login user kwickboot. Opens the status page, which turns into the console's admin
+sign-in. Chromium trusts exactly this server's own certificate (the pin the root service kwickboot-screen-state writes to
+/run/kwickboot/console).
+
+Watched three ways:
+  - Chromium exits or crashes             -> started again
+  - the page crashes ("Aw, Snap!") or stops answering for 30 s -> reloaded; still dead -> Chromium restarted
+  - the server's certificate pin changes  -> restarted with the new pin
+The health check talks to Chromium over its private DevTools *pipe* (fd 3/4 of this process only) - never a TCP port,
+so no other local program can drive the kiosk browser.
+"""
+import fcntl
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+STATE = "/run/kwickboot/console"
+PAGE = "file:///run/kwickboot/screen.html"
+CHECK_EVERY, ANSWER_WITHIN, STRIKES = 15, 10, 2
+
+
+def pin():
+    try:
+        with open(STATE) as f:
+            lines = f.read().splitlines()
+        return lines[1] if len(lines) > 1 else ""
+    except OSError:
+        return ""
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+class Browser:
+    def __init__(self, spki):
+        self.spki = spki
+        # DevTools pipe: Chromium reads commands on fd 3 and writes replies on fd 4. Set those two numbers up here, before
+        # the start (subprocess closes stray fds only after a preexec hook, so they cannot be made there), keep our own
+        # ends on high close-on-exec fds, and pass exactly 3 and 4.
+        to_r, to_w = os.pipe()
+        from_r, from_w = os.pipe()
+        hi = lambda fd: fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 100)
+        self.to_w, self.from_r, cr, cw = hi(to_w), hi(from_r), hi(to_r), hi(from_w)
+        for fd in (to_r, to_w, from_r, from_w):
+            os.close(fd)
+        os.dup2(cr, 3)
+        os.dup2(cw, 4)
+        os.close(cr)
+        os.close(cw)
+        # profile + cache on a RAM disk: the user's runtime dir (tmpfs from systemd-logind, cleared at logout)
+        run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        prof = os.path.join(run if os.path.isdir(run) else "/tmp", "kwickboot-chromium")
+        args = ["chromium", "--kiosk", "--no-first-run", "--noerrdialogs", "--disable-infobars", "--disable-session-crashed-bubble",
+                "--disable-translate", "--disable-features=Translate,MediaRouter", "--password-store=basic", "--no-default-browser-check",
+                "--user-data-dir=" + prof, "--disk-cache-dir=" + os.path.join(prof, "cache"), "--disk-cache-size=67108864",
+                "--remote-debugging-pipe"]
+        if spki:
+            args.append("--ignore-certificate-errors-spki-list=" + spki)
+        args.append(PAGE)
+
+        self.p = subprocess.Popen(args, pass_fds=(3, 4), close_fds=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        os.close(3)
+        os.close(4)
+        self.buf, self.next_id, self.session, self.crashed = b"", 0, None, False
+
+    def send(self, method, params=None, session=None):
+        self.next_id += 1
+        msg = {"id": self.next_id, "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        os.write(self.to_w, json.dumps(msg).encode() + b"\0")
+        return self.next_id
+
+    def read(self, timeout):
+        """Messages that arrive within timeout seconds (also notes target crashes)."""
+        out, end = [], time.time() + timeout
+        while True:
+            left = end - time.time()
+            if left <= 0:
+                break
+            r, _, _ = select.select([self.from_r], [], [], left)
+            if not r:
+                break
+            chunk = os.read(self.from_r, 65536)
+            if not chunk:
+                break
+            self.buf += chunk
+            while b"\0" in self.buf:
+                raw, self.buf = self.buf.split(b"\0", 1)
+                try:
+                    m = json.loads(raw)
+                except ValueError:
+                    continue
+                if m.get("method") in ("Inspector.targetCrashed", "Target.targetCrashed"):
+                    self.crashed = True
+                out.append(m)
+            if out and timeout == 0:
+                break
+        return out
+
+    def call(self, method, params=None, session=None, timeout=ANSWER_WITHIN):
+        i = self.send(method, params, session)
+        end = time.time() + timeout
+        while time.time() < end:
+            for m in self.read(min(1.0, end - time.time())):
+                if m.get("id") == i:
+                    return m
+        return None
+
+    def attach(self):
+        """Attach to the kiosk's page (the first 'page' target)."""
+        r = self.call("Target.getTargets")
+        pages = [t for t in ((r or {}).get("result") or {}).get("targetInfos", []) if t.get("type") == "page"]
+        if not pages:
+            return False
+        a = self.call("Target.attachToTarget", {"targetId": pages[0]["targetId"], "flatten": True})
+        self.session = ((a or {}).get("result") or {}).get("sessionId")
+        if self.session:
+            self.call("Inspector.enable", session=self.session)
+        return bool(self.session)
+
+    def healthy(self):
+        if self.crashed:
+            return False
+        if not self.session and not self.attach():
+            return False
+        r = self.call("Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True}, session=self.session)
+        return bool(r and "result" in r and not self.crashed)
+
+    def reload(self):
+        self.crashed = False
+        if self.session:
+            self.call("Page.reload", {"ignoreCache": True}, session=self.session)
+        else:
+            self.attach()
+
+    def stop(self):
+        try:
+            self.p.terminate()
+            self.p.wait(10)
+        except Exception:                    # noqa: BLE001
+            self.p.kill()
+        for fd in (self.to_w, self.from_r):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def main():
+    while True:
+        spki = pin()
+        b = Browser(spki)
+        log(f"chromium started (pin {'set' if spki else 'none yet'})")
+        time.sleep(8)                        # let it open the page
+        strikes = 0
+        while b.p.poll() is None:
+            if pin() != spki:
+                log("certificate pin changed: restarting chromium")
+                break
+            b.read(0)
+            if b.healthy():
+                strikes = 0
+            else:
+                strikes += 1
+                log(f"page not answering / crashed (strike {strikes})")
+                if strikes >= STRIKES:
+                    log("restarting chromium")
+                    break
+                b.reload()
+            time.sleep(CHECK_EVERY)
+        if b.p.poll() is not None:
+            err = (b.p.stderr.read() or b"").decode(errors="replace").strip().splitlines()[-3:]
+            log(f"chromium exited ({b.p.returncode}): starting it again" + "".join("\n    " + e for e in err))
+        b.stop()
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

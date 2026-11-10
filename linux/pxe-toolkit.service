@@ -1,0 +1,32 @@
+[Unit]
+Description=PXE toolkit (proxyDHCP 67/4011, TFTP 69, HTTP 8080) - answers only allowed MACs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pxe
+Group=pxe
+WorkingDirectory=/opt/pxe-toolkit
+ExecStart=/usr/bin/python3 -u /opt/pxe-toolkit/pxeserver.py
+Restart=on-failure
+RestartSec=5
+# low ports + bind to interface, nothing else
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# the service log in RAM (/run/kwickboot-logs): kept across restarts, gone at reboot - see pxeserver.py LOG_DIR
+RuntimeDirectory=kwickboot-logs
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+# open files: every live console = 1 socket + its thread's database files (systemd's soft default of 1024 runs out at
+# ~300 consoles); threads for hundreds of consoles and a room of booting PCs
+LimitNOFILE=65536
+TasksMax=8192
+ReadWritePaths=/opt/pxe-toolkit/data /opt/pxe-toolkit/logs /opt/pxe-toolkit/machines /opt/pxe-toolkit/tftp/debian-installer/amd64/grub -/opt/pxe-toolkit/tftp/debian-installer/arm64/grub -/opt/pxe-toolkit/tftp/debian-installer/i386/grub /opt/pxe-toolkit/tftp/alpine
+
+[Install]
+WantedBy=multi-user.target

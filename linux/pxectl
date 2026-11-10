@@ -1,0 +1,117 @@
+#!/bin/sh
+# pxectl - control KwickBoot on Linux (state lives in /opt/pxe-toolkit/data/kwickboot.db)
+#   pxectl start|stop|restart|status|log
+#   pxectl discover <minutes>|off      open/close the discovery window (unknown machines boot the RAM OS)
+#   pxectl machines                    all machine records (approved, default, next, agent, preflight)
+#   pxectl approve <mac> <name> | deny <mac>
+#   pxectl default <mac> alpine|local|menu|seat   seat = diskless gaming seat (Steam Big Picture)
+#   pxectl next <mac> <action>         one-shot: alpine local menu debian13 memtest netbootxyz shell windows iso:<f.iso>
+#   pxectl job <mac> <type> [K=v ..]   inventory preflight install reboot poweroff
+#   pxectl install <mac> <os> serial=<SERIAL> host=<name> [disk=] [tz=] [lan=] [bundle=] [finish=reboot|none]
+#   pxectl jobs <mac> | joblog <mac> [job-id] [-f] | agent <mac> | report <mac> [inventory|preflight]
+#   pxectl useradd <user> <role> | passwd [user] | role <user> <role> | userdel <user> | users | audit [n]
+#   pxectl setup-code                  first-run: the code to create the first admin in the web console
+#   pxectl depts | dept-add <name> | dept-del <name> | assign <mac> <dept>|none | user-depts <user> [dept ..]
+#   pxectl node-token | node-info      make this server a federation node / show its fingerprint
+#   pxectl policy <dept> [os=a,b|any] [bundles=x,y|any] [prefix=lab-|none] [installs=operator|manager|admin]
+#   pxectl ep <mac> update|checkupdates|reboot|setpw|adduser|lockuser|unlockuser [user=x] [admin=1]   managed machines
+#   pxectl ep-status <mac>
+#   pxectl localboot <mac> auto|chainload|exit   hand-off to the installed OS (firmware quirks)
+#   pxectl shell <mac> on|off            emergency console (Alt+F2) in that machine's RAM OS from its next boot
+#   pxectl iso [list] | add <https-url> <sha256> [name.iso] | rm <name.iso>   installer ISOs for manual installs
+#   pxectl driver [list] | add <name> <https-url> <sha256> [--all] | import <name> <folder> [--all] | rm <name> | match <inv>
+#   pxectl driver catalogs | lookup <mac> | auto <mac>   the PC maker's official pack for that machine's model (Dell)
+#   pxectl cache [<recipe>|rm <recipe>]  keep a recipe's vendor image on this server (installs then run at LAN speed)
+set -e
+T=/opt/pxe-toolkit
+kb() { KB_CALLER="${SUDO_USER:-$(id -un)}" runuser -u pxe -- python3 $T/kbctl.py "$@"; }
+md() { echo "$T/machines/$(echo "$1" | tr 'A-F-' 'a-f:' | tr ':' '-')"; }
+LOGD=/run/kwickboot-logs; [ -d "$LOGD" ] || LOGD=$T/logs      # the service log is in RAM (systemd RuntimeDirectory)
+case "$1" in
+  start|stop|restart) systemctl "$1" pxe-toolkit; systemctl --no-pager -n 0 status pxe-toolkit | head -n 3 ;;
+  status)  systemctl --no-pager status pxe-toolkit | head -n 3; kb discovery-status
+           tail -n 10 "$(ls -t $LOGD/pxe-*.log 2>/dev/null | head -n1)" 2>/dev/null || true ;;
+  log)     tail -f "$(ls -t $LOGD/pxe-*.log | head -n1)" ;;
+  joblog)  id=$3; [ -z "$id" ] || [ "$id" = "-f" ] && id=$(kb lastjob "$2")
+           f="$(md "$2")/jobs/$id.log"; [ -f "$f" ] || { echo "no log yet for $id"; exit 1; }
+           if [ "$3" = "-f" ] || [ "$4" = "-f" ]; then tail -f "$f"; else cat "$f"; fi ;;
+  cache)   # vendor image of an image recipe -> http/images/<basename>; recipes/image.sh prefers that copy (same checksum)
+           R=$T/http/recipes; I=$T/http/images
+           img() { sed -n 's/^IMAGE=\(https:\/\/[^ ;]*\)$/\1/p' "$R/$1.sh" | head -n1; }
+           sum() { sed -n 's/^SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$R/$1.sh" | head -n1; }
+           if [ -z "$2" ]; then
+             for f in $R/*.sh; do r=${f##*/}; r=${r%.sh}; u=$(img $r); [ -n "$u" ] || continue
+               b=${u##*/}; if [ -f "$I/$b" ]; then st="cached $(du -h "$I/$b" | cut -f1)"; else st="not cached"; fi
+               printf '%-16s %-14s %s\n' "$r" "$st" "$u"; done
+             df -h $I | awk 'NR==2{print "free on server: "$4}'; exit 0; fi
+           if [ "$2" = rm ]; then u=$(img "$3"); [ -n "$u" ] || { echo "no vendor image in recipe $3"; exit 1; }
+             rm -f "$I/${u##*/}" "$I/${u##*/}.sha256"; echo "removed $I/${u##*/}"; exit 0; fi
+           echo "$2" | grep -qx '[a-z0-9-]*' && [ -f "$R/$2.sh" ] || { echo "no recipe $2"; exit 1; }
+           u=$(img "$2"); h=$(sum "$2")
+           [ -n "$u" ] && [ -n "$h" ] || { echo "recipe $2 has no https IMAGE= with a SHA256= (nothing to cache)"; exit 1; }
+           b=${u##*/}; [ -f "$I/$b" ] && { echo "already cached: $I/$b"; exit 0; }
+           len=$(curl -sIL --proto =https "$u" | tr -d '\r' | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}')
+           free=$(df -B1 --output=avail $I | tail -n1)
+           [ $((len + 2000000000)) -gt "$free" ] && { echo "not enough space: needs $((len/1000000)) MB + 2 GB reserve, $((free/1000000)) MB free"; exit 1; }
+           echo "downloading $u ($((len/1000000)) MB)"
+           curl -fsSL --proto =https --retry 3 -o "$I/$b.part" "$u" || { rm -f "$I/$b.part"; echo "download failed"; exit 1; }
+           got=$(sha256sum "$I/$b.part" | cut -d' ' -f1)
+           [ "$got" = "$h" ] || { rm -f "$I/$b.part"; echo "CHECKSUM MISMATCH ($got, recipe says $h) - discarded"; exit 1; }
+           mv "$I/$b.part" "$I/$b"; echo "$h  $b" > "$I/$b.sha256"; chmod 644 "$I/$b" "$I/$b.sha256" 2>/dev/null || true   # exFAT: mount sets permissions
+           echo "cached $I/$b (sha256 verified)" ;;
+  setup-code)   # first-run: the code the console asks for to create the first admin (exists only while there is none)
+           hp=$(python3 -c "import json; print(json.load(open('$T/config.json')).get('ui_https_port') or '')" 2>/dev/null)
+           u="http://$(hostname -I | awk '{print $1}'):8080/ui/"; [ -n "$hp" ] && u="https://$(hostname -I | awk '{print $1}'):$hp/ui/"
+           if [ -s $T/data/setup-code ]; then echo "Setup code: $(cat $T/data/setup-code)   - console: $u"
+           else echo "No setup code: this server already has an admin (sign in, or: pxectl passwd <user>)"; fi ;;
+  driver)  # Windows driver library (drivers.py): matched to each PC's PCI devices at install time
+           shift; runuser -u pxe -- python3 $T/drivers.py "$@" ;;
+  iso)     # installer ISOs for manual installs (web console: Install -> Manual install): http/iso/<name>.iso
+           I=$T/http/iso; mkdir -p $I
+           case "$2" in
+             ""|list) ls -la $I | awk 'NR>1 && /\.iso$/{printf "%-60s %8.1f GB\n", $9, $5/1e9}'; df -h $I | awk 'NR==2{print "free on server: "$4}' ;;
+             rm)  echo "$3" | grep -qx '[A-Za-z0-9._+-]*\.iso' && [ -f "$I/$3" ] || { echo "no ISO $3"; exit 1; }; rm -f "$I/$3"; echo "removed $3" ;;
+             add) u=$3; h=$4; b=${5:-${u##*/}}
+                  echo "$u" | grep -qE '^https://[A-Za-z0-9./_+:-]+$' || { echo "usage: pxectl iso add <https://...iso> <sha256> [name.iso]"; exit 1; }
+                  echo "$h" | grep -qxE '[0-9a-f]{64}' || { echo "the SHA-256 (64 hex) from the vendor is required"; exit 1; }
+                  echo "$b" | grep -qx '[A-Za-z0-9._+-]*\.iso' || { echo "bad name $b"; exit 1; }
+                  [ -f "$I/$b" ] && { echo "already there: $b"; exit 0; }
+                  len=$(curl -sIL --proto =https "$u" | tr -d '\r' | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}')
+                  free=$(df -B1 --output=avail $I | tail -n1)
+                  [ $((len + 2000000000)) -gt "$free" ] && { echo "not enough space: $((len/1000000)) MB + 2 GB reserve, $((free/1000000)) MB free"; exit 1; }
+                  echo "downloading $u ($((len/1000000)) MB)"
+                  curl -fsSL --proto =https --retry 3 -o "$I/$b.part" "$u" || { rm -f "$I/$b.part"; echo "download failed"; exit 1; }
+                  got=$(sha256sum "$I/$b.part" | cut -d' ' -f1)
+                  [ "$got" = "$h" ] || { rm -f "$I/$b.part"; echo "CHECKSUM MISMATCH ($got) - discarded"; exit 1; }
+                  mv "$I/$b.part" "$I/$b"; chmod 644 "$I/$b" 2>/dev/null || true; echo "added $b (sha256 verified)" ;;
+             *) echo "usage: pxectl iso [list] | add <https-url> <sha256> [name.iso] | rm <name.iso>"; exit 1 ;;
+           esac ;;
+  winapp)  # Windows app bundle: installers kept on this server, each from its official URL with its published SHA-256.
+           # New Windows installs ("apps: bundle") get them over the LAN; the Windows side re-checks every hash before running.
+           #   pxectl winapp [list] | add <name> <https-url> <sha256> <msi|exe> [silent args] | rm <name>
+           A=$T/http/winapps; mkdir -p $A; C=$A/catalog.tsv; touch $C
+           case "$2" in
+             ""|list) [ -s $C ] && awk -F'\t' '{printf "%-16s %-34s %s  %-3s %-16s %s\n", $1, $2, substr($3,1,12), $4, $5, $6}' $C || echo "no apps yet: pxectl winapp add <name> <https-url> <sha256> <msi|exe> [args]" ;;
+             rm)  grep -q "^$3	" $C || { echo "no app $3"; exit 1; }
+                  f=$(awk -F'\t' -v n="$3" '$1==n{print $2}' $C); rm -f "$A/$f"; awk -F'\t' -v n="$3" '$1!=n' $C > $C.new && mv $C.new $C; echo "removed $3" ;;
+             add) n=$3; u=$4; h=$5; k=$6; shift 6 2>/dev/null; args="$*"
+                  echo "$n" | grep -qx '[A-Za-z0-9._+-]\{1,40\}' || { echo "usage: pxectl winapp add <name> <https-url> <sha256> <msi|exe> [silent args]"; exit 1; }
+                  echo "$u" | grep -qE '^https://[A-Za-z0-9./_+:%=?&-]+$' || { echo "an official https:// download URL is required"; exit 1; }
+                  echo "$h" | grep -qxE '[0-9a-fA-F]{64}' || { echo "the SHA-256 the vendor publishes (64 hex) is required"; exit 1; }
+                  case "$k" in msi) [ -n "$args" ] || args="/qn /norestart" ;; exe) [ -n "$args" ] || { echo "exe installers need their silent switch, e.g. /S"; exit 1; } ;; *) echo "kind: msi or exe"; exit 1 ;; esac
+                  echo "$args" | grep -q '[	"]' && { echo "args: no tabs or quotes"; exit 1; }
+                  h=$(echo "$h" | tr 'A-F' 'a-f'); f="$n.$k"
+                  grep -q "^$n	" $C && { echo "already there: $n (pxectl winapp rm $n first)"; exit 1; }
+                  echo "downloading $u"
+                  curl -fsSL --proto =https --retry 3 -o "$A/$f.part" "$u" || { rm -f "$A/$f.part"; echo "download failed"; exit 1; }
+                  got=$(sha256sum "$A/$f.part" | cut -d' ' -f1)
+                  [ "$got" = "$h" ] || { rm -f "$A/$f.part"; echo "CHECKSUM MISMATCH ($got) - discarded"; exit 1; }
+                  mv "$A/$f.part" "$A/$f"; chmod 644 "$A/$f" "$C"
+                  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$f" "$h" "$k" "$args" "$u" >> $C
+                  echo "added $n (sha256 verified) - new Windows installs with the app bundle get it" ;;
+             *) echo "usage: pxectl winapp [list] | add <name> <https-url> <sha256> <msi|exe> [args] | rm <name>"; exit 1 ;;
+           esac ;;
+  discover|machines|approve|deny|default|next|job|install|jobs|agent|report|useradd|passwd|role|userdel|users|audit|depts|dept-add|dept-del|assign|user-depts|policy|node-token|node-info|ep|ep-status|localboot|shell|compat|san)
+           kb "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d' ;;
+esac

@@ -1,0 +1,403 @@
+#!/bin/sh
+# KwickBoot Rescue: guided repairs for a PC that will not start or that nobody can sign in to.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Runs in the KwickBoot RAM OS (stick menu "Rescue", or later as a console action). Every action says what it will
+# touch and asks before it writes anything. Nothing is changed by just looking.
+line() { echo "------------------------------------------------------------------------------"; }
+ask() { printf '\033[?25h%s' "$1"; read -r REPLY; }   # show the cursor for text prompts (the graphical menu hides it)
+# branded framebuffer menu (same theme as the boot menu): draws the chrome + this PC's disks, reads the choice into
+# REPLY. Returns 1 when there is no usable framebuffer, so the plain text menu below is used instead.
+FBDIR=/usr/share/kbrescue
+menu_fb() {
+  [ -e /dev/fb0 ] && [ -x /bin/kbrescue-fb ] && [ -f "$FBDIR/rescue-chrome.bgra.gz" ] || return 1
+  lsblk -dno NAME,SIZE,MODEL 2>/dev/null | awk -v s="$isodisk" '$1 != s' | head -3 > /tmp/kbr-disks
+  printf '\033[?25l' 2>/dev/null                               # hide the console cursor while the graphical menu is up
+  REPLY=$(/bin/kbrescue-fb "$FBDIR/rescue-chrome.bgra.gz" "$FBDIR/rescue-chrome.info" "$FBDIR/font.raw" /tmp/kbr-disks) || return 1
+  clear 2>/dev/null                                            # the chosen action prints its text on a clean screen
+}
+yes_typed() { ask " Type YES to go ahead: "; [ "$REPLY" = YES ] || { echo " Cancelled - nothing was changed."; return 1; }; }
+M=/mnt/kbr; mkdir -p $M
+cleanup() { for m in $M/sys $M/proc $M/dev/pts $M/dev $M/run $M/boot/efi $M/boot $M; do mountpoint -q $m && umount $m 2>/dev/null; done
+  for d in /dev/mapper/kbr*; do [ -e "$d" ] && cryptsetup close "$(basename "$d")" 2>/dev/null; done; }   # kbrwin kbrlux kbrvc
+trap cleanup EXIT
+isodev=$(cat /run/kb-iso-dev 2>/dev/null); isodisk=$(lsblk -no PKNAME "$isodev" 2>/dev/null | head -n1); [ -z "$isodisk" ] && isodisk=$(basename "${isodev:-none}")
+
+# mount an NTFS partition read/WRITE. Windows Fast Startup / hibernation (or an unclean shutdown) leaves NTFS "in use",
+# so ntfs-3g mounts it read-only; we then re-mount with force (after a warning) so changes can actually be written.
+ntfs_rw() {   # <partition> <mountpoint>
+  ntfs-3g "$1" "$2" 2>/tmp/kbr.err
+  if touch "$2/.kbw" 2>/dev/null; then rm -f "$2/.kbw"; return 0; fi      # clean read/write mount
+  umount "$2" 2>/dev/null
+  echo " This Windows filesystem is marked in use (Fast Startup / hibernation, or an unclean shutdown)."
+  echo " To write to it, it is mounted read/write: any hibernated session is discarded and Windows runs a disk check at its next start."
+  yes_typed || return 1
+  ntfsfix -d "$1" >/dev/null 2>&1                                      # clear the dirty flag + empty the journal
+  ntfs-3g -o remove_hiberfile "$1" "$2" 2>/tmp/kbr.err \
+    || ntfs-3g -o remove_hiberfile,force "$1" "$2" 2>/tmp/kbr.err \
+    || { cat /tmp/kbr.err; return 1; }                                 # remove the hibernation / Fast Startup file, mount read/write
+  if touch "$2/.kbw" 2>/dev/null; then rm -f "$2/.kbw"; return 0; fi
+  echo " Still read-only - cannot write to it."; umount "$2" 2>/dev/null; return 1
+}
+
+# partitions of this PC's disks (never the stick): "dev type size label". The filesystem type + label come from blkid
+# (a direct device probe) - NOT lsblk's FSTYPE column, which is empty in the RAM OS because no udev populates it.
+parts() { lsblk -lnpo NAME,SIZE,PKNAME,TYPE | awk -v s="$isodisk" '$4=="part" && $3 !~ s"$"' | while read -r d z p t; do
+  case "$(basename "$p")" in loop*|ram*|zram*|sr*) continue ;; esac
+  ft=$(blkid -o value -s TYPE "$d" 2>/dev/null); [ -n "$ft" ] || continue
+  lb=$(blkid -o value -s LABEL "$d" 2>/dev/null); echo "$d $ft $z ${lb:--}"; done; }
+choose() {   # choose <filter-regex on type>: sets PART (and PTYPE)
+  i=0; : > /tmp/kbr-parts
+  parts | awk -v f="$1" '$2 ~ f' | while read -r d t z l; do echo "$d $t" >> /tmp/kbr-parts; done
+  [ -s /tmp/kbr-parts ] || { echo " No suitable partition found."; return 1; }
+  while read -r d t; do i=$((i + 1)); printf '  %d) %-16s %-11s %8s  %s\n' "$i" "$d" "$t" "$(lsblk -dno SIZE "$d")" "$(lsblk -dno LABEL "$d")"; done < /tmp/kbr-parts
+  ask " Which one? (number) "; PART=$(sed -n "${REPLY}p" /tmp/kbr-parts | cut -d' ' -f1); PTYPE=$(sed -n "${REPLY}p" /tmp/kbr-parts | cut -d' ' -f2)
+  [ -n "$PART" ] || { echo " No such partition."; return 1; }; }
+unlock() {   # BitLocker / LUKS -> sets PART to the opened device
+  case "$PTYPE" in
+    BitLocker) echo " $PART is BitLocker-encrypted: type its 48-digit recovery key (Microsoft account / AD / Entra / printout)."
+               cryptsetup open --type bitlk "$PART" kbrwin || return 1; PART=/dev/mapper/kbrwin; PTYPE=ntfs ;;
+    crypto_LUKS) echo " $PART is LUKS-encrypted: type its passphrase."
+               cryptsetup open "$PART" kbrlux || return 1; PART=/dev/mapper/kbrlux; PTYPE=$(blkid -o value -s TYPE "$PART") ;;
+  esac; }
+
+win_password() {
+  line; echo " Windows: reset a LOCAL account's password (blank) and unlock / enable it - e.g. the built-in Administrator."
+  echo " (Microsoft / Entra / domain accounts cannot be reset offline; a domain admin resets those in AD / Entra.)"
+  choose 'ntfs|BitLocker' || return; unlock || return
+  ntfs_rw "$PART" $M || return
+  S=$(ls -d $M/[Ww]indows/[Ss]ystem32/[Cc]onfig/SAM 2>/dev/null | head -n1)
+  [ -n "$S" ] || { echo " No Windows installation on $PART (no Windows/System32/config/SAM)."; umount $M; return; }
+  cp -a "$S" "$S.kwickboot-backup-$(date +%Y%m%d-%H%M%S)"            # the original stays next to it
+  echo " Local accounts:"; chntpw -l "$S" | sed -n '/RID/,$p' | grep -E '^\| ' | sed 's/^/   /'
+  ask " Account name to reset (e.g. Administrator): "; U=$REPLY; [ -n "$U" ] || { umount $M; return; }
+  echo " $U on $PART: password -> blank, account -> unlocked + enabled. A backup of the SAM file stays next to it."
+  yes_typed || { umount $M; return; }
+  printf '1\n2\nq\ny\n' | chntpw -u "$U" "$S" > /tmp/kbr-chntpw.log 2>&1
+  if grep -qi 'Hives that have changed' /tmp/kbr-chntpw.log || grep -qi 'Write hive files' /tmp/kbr-chntpw.log; then
+    sync; umount $M; echo " Done: $U has no password now. Sign in, then set a new password at once."
+  else cat /tmp/kbr-chntpw.log | tail -n 15; umount $M; echo " chntpw did not confirm the change (log above)."; fi
+}
+
+linux_password() {
+  line; echo " Linux: set a new password for root or a user of an installed system."
+  choose 'ext4|ext3|xfs|btrfs|crypto_LUKS' || return; unlock || return
+  mount "$PART" $M || return
+  [ -f $M/etc/shadow ] || { echo " No Linux system on $PART (no /etc/shadow)."; umount $M; return; }
+  echo " Users with a login: root $(awk -F: '$3>=1000 && $3<65534 {printf "%s ", $1}' $M/etc/passwd)"
+  ask " User: "; U=$REPLY; grep -q "^$U:" $M/etc/passwd || { echo " No such user."; umount $M; return; }
+  stty -echo; ask " New password: "; P1=$REPLY; echo; ask " Repeat: "; P2=$REPLY; echo; stty echo
+  [ -n "$P1" ] && [ "$P1" = "$P2" ] || { echo " Empty or different."; umount $M; return; }
+  cp -a $M/etc/shadow "$M/etc/shadow.kwickboot-backup-$(date +%Y%m%d-%H%M%S)"
+  printf '%s:%s\n' "$U" "$P1" | chroot $M chpasswd && echo " Done: new password set for $U." || echo " chpasswd failed."
+  P1=""; P2=""; chroot $M passwd -u "$U" >/dev/null 2>&1; sync; umount $M
+}
+
+mount_system() {   # the installed Linux root + its /boot and EFI partition (from its fstab) + /dev /proc /sys
+  mount "$PART" $M || return 1
+  [ -f $M/etc/fstab ] || { echo " No Linux system on $PART."; umount $M; return 1; }
+  for mp in /boot /boot/efi; do
+    spec=$(awk -v m="$mp" '$2==m && $1!~/^#/{print $1}' $M/etc/fstab); [ -n "$spec" ] || continue
+    dev=$(findfs "$spec" 2>/dev/null || echo "$spec"); mkdir -p $M$mp; mount "$dev" $M$mp || true
+  done
+  for d in dev dev/pts proc sys run; do mount --bind /$d $M/$d; done
+  [ -d /sys/firmware/efi/efivars ] && mount -t efivarfs efivarfs $M/sys/firmware/efi/efivars 2>/dev/null; return 0; }
+
+grub_repair() {
+  line; echo " Linux boot repair: reinstall the system's own GRUB, rebuild its menu, recreate the firmware boot entry."
+  choose 'ext4|ext3|xfs|btrfs|crypto_LUKS' || return; unlock || return; mount_system || return
+  disk=/dev/$(lsblk -no PKNAME "$PART" | head -n1)
+  if [ -d /sys/firmware/efi ]; then echo " UEFI: GRUB on the EFI partition of $disk (+ the removable fallback path)."
+  else echo " Legacy BIOS: GRUB into the start of $disk."; fi
+  yes_typed || { cleanup; return; }
+  if [ -d /sys/firmware/efi ]; then
+    chroot $M grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --uefi-secure-boot 2>&1 | tail -n 2
+    chroot $M grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --uefi-secure-boot --removable --no-nvram 2>&1 | tail -n 1
+  else chroot $M grub-install "$disk" 2>&1 | tail -n 2; fi
+  chroot $M update-grub 2>&1 | grep -E 'Found|done'; sync; cleanup; echo " Done - restart without the stick."
+}
+
+windows_boot_repair() {
+  line; echo " Windows boot repair (start-up files and firmware entry - Windows' own BCD rebuild needs Windows: bcdboot)."
+  if [ -d /sys/firmware/efi ]; then
+    echo " Windows partition:"; choose 'ntfs|BitLocker' || return; unlock || return
+    ntfs-3g -o ro "$PART" $M || return
+    src=$(ls -d $M/[Ww]indows/[Bb]oot/EFI 2>/dev/null | head -n1); [ -n "$src" ] || { echo " No Windows/Boot/EFI on $PART."; umount $M; return; }
+    disk=/dev/$(lsblk -no PKNAME "$PART" | head -n1)
+    esp=$(lsblk -lnpo NAME,PARTTYPE "$disk" | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1; exit}')
+    [ -n "$esp" ] || { echo " No EFI system partition on $disk."; umount $M; return; }
+    echo " Copy the Windows boot files to $esp (EFI/Microsoft/Boot, an existing BCD is kept) and add the firmware entry."
+    yes_typed || { umount $M; return; }
+    mkdir -p /mnt/kbesp; mount "$esp" /mnt/kbesp || { umount $M; return; }
+    mkdir -p /mnt/kbesp/EFI/Microsoft/Boot /mnt/kbesp/EFI/Boot
+    for f in "$src"/*; do b=$(basename "$f"); [ -e "/mnt/kbesp/EFI/Microsoft/Boot/$b" ] || cp -r "$f" /mnt/kbesp/EFI/Microsoft/Boot/; done
+    [ -e /mnt/kbesp/EFI/Boot/bootx64.efi ] || cp "$src/bootmgfw.efi" /mnt/kbesp/EFI/Boot/bootx64.efi 2>/dev/null
+    [ -e /mnt/kbesp/EFI/Microsoft/Boot/BCD ] || echo " NOTE: no BCD store - start Windows Setup / WinPE and run:  bcdboot C:\\Windows"
+    n=$(echo "$esp" | grep -oE '[0-9]+$')
+    efibootmgr | grep -qi 'Windows Boot Manager' || efibootmgr -c -d "$disk" -p "$n" -L "Windows Boot Manager" -l '\EFI\Microsoft\Boot\bootmgfw.efi' >/dev/null
+    sync; umount /mnt/kbesp; umount $M; echo " Done: firmware entry + boot files in place."
+  else
+    echo " Legacy BIOS: write the standard boot code to the disk's first sector (the partition table is kept) and"
+    echo " mark the Windows partition active."
+    choose 'ntfs' || return; disk=/dev/$(lsblk -no PKNAME "$PART" | head -n1); n=$(echo "$PART" | grep -oE '[0-9]+$')
+    [ "$(sfdisk -d "$disk" | sed -n 's/^label: //p')" = dos ] || { echo " $disk is not an MBR disk (GPT needs UEFI)."; return; }
+    yes_typed || return
+    dd if="$disk" of="/kbdata/mbr-backup-$(basename "$disk")-$(date +%Y%m%d-%H%M%S).bin" bs=512 count=1 2>/dev/null || dd if="$disk" of=/tmp/mbr-backup.bin bs=512 count=1 2>/dev/null
+    dd if=/usr/lib/syslinux/mbr/mbr.bin of="$disk" bs=440 count=1 conv=notrunc 2>/dev/null && sfdisk --activate "$disk" "$n" >/dev/null && sync \
+      && echo " Done (the old first sector is saved on the stick, or in /tmp)." || echo " Failed."
+  fi
+}
+
+check_fs() {
+  line; echo " Check (and if needed repair) a file system. First a read-only check; repairs only after you confirm."
+  choose 'ntfs|ext[234]|xfs|vfat|exfat|BitLocker|crypto_LUKS' || return; unlock || return
+  mountpoint -q $M && umount $M
+  case "$PTYPE" in
+    ext2|ext3|ext4) e2fsck -fn "$PART"; r=$? ;; xfs) xfs_repair -n "$PART"; r=$? ;; vfat) fsck.vfat -n "$PART"; r=$? ;;
+    exfat) fsck.exfat -n "$PART"; r=$? ;; ntfs) ntfsfix -n "$PART"; r=$? ;; *) echo " $PTYPE: no checker here."; return ;;
+  esac
+  [ "$r" = 0 ] && { echo " No problems found."; return; }
+  echo " Problems found. Repair now?"; yes_typed || return
+  case "$PTYPE" in
+    ext2|ext3|ext4) e2fsck -fy "$PART" ;; xfs) xfs_repair "$PART" ;; vfat) fsck.vfat -a "$PART" ;; exfat) fsck.exfat -y "$PART" ;;
+    ntfs) ntfsfix "$PART"; echo " ntfsfix fixes common NTFS problems and asks Windows to run a full chkdsk at its next start." ;;
+  esac
+}
+
+veracrypt_open() {
+  line; echo " Open a VeraCrypt (or TrueCrypt) volume read-only, to copy files off it. VeraCrypt volumes have no"
+  echo " visible signature, so every partition is listed - pick the one you know is encrypted."
+  i=0; : > /tmp/kbr-all
+  lsblk -lnpo NAME,TYPE,SIZE,FSTYPE,PKNAME | awk -v s="$isodisk" '$2=="part" && $5 !~ s"$"' | while read -r d t z f p; do echo "$d" >> /tmp/kbr-all; done
+  while read -r d; do i=$((i + 1)); fs=$(blkid -o value -s TYPE "$d" 2>/dev/null); printf '  %d) %-16s %8s  %s\n' "$i" "$d" "$(lsblk -dno SIZE "$d")" "${fs:-(no file system detected)}"; done < /tmp/kbr-all
+  ask " Which one? (number) "; PART=$(sed -n "${REPLY}p" /tmp/kbr-all); [ -b "$PART" ] || { echo " No such partition."; return; }
+  ask " Windows system partition encrypted with VeraCrypt system encryption? [y/N] "; sysopt=""; [ "$REPLY" = y ] && sysopt="--tcrypt-system"
+  ask " PIM (press Enter if none was set): "; pim=""; [ -n "$REPLY" ] && pim="--veracrypt-pim=$REPLY"
+  echo " Password:"
+  cryptsetup open --type tcrypt --veracrypt $sysopt $pim --readonly "$PART" kbrvc || { echo " Could not open (wrong password, PIM or not a VeraCrypt volume)."; return; }
+  t=$(blkid -o value -s TYPE /dev/mapper/kbrvc)
+  case "$t" in ntfs) ntfs-3g -o ro /dev/mapper/kbrvc $M ;; "") echo " Opened, but no file system inside."; cryptsetup close kbrvc; return ;; *) mount -o ro /dev/mapper/kbrvc $M ;; esac || { cryptsetup close kbrvc; return; }
+  echo " Opened read-only at $M ($t). Copy what you need to the stick: cp -a $M/... /kbdata/  - exit the shell when done."
+  (cd $M && PS1='veracrypt# ' sh -l); umount $M; cryptsetup close kbrvc
+}
+
+gpt_repair() {
+  line; echo " Partition table: back up the first + last MiB to the stick, or rebuild a damaged GPT from its backup copy."
+  ask " Disk (e.g. /dev/sda, /dev/nvme0n1): "; d=$REPLY; [ -b "$d" ] || { echo " No such disk."; return; }
+  [ "$(basename "$d")" = "$isodisk" ] && { echo " That is the stick."; return; }
+  f=/kbdata/ptable-$(basename "$d")-$(date +%Y%m%d-%H%M%S); [ -d /kbdata ] || f=/tmp/ptable-$(basename "$d")
+  sgdisk --backup="$f.sgdisk" "$d" >/dev/null 2>&1 && echo " Backup: $f.sgdisk"
+  sgdisk -v "$d" | tail -n 4
+  ask " Rebuild the main GPT from the backup at the end of the disk? [y/N] "; [ "$REPLY" = y ] || return
+  yes_typed || return; printf 'r\nb\nw\nY\n' | gdisk "$d" >/dev/null 2>&1 || sgdisk -e "$d"; sgdisk -v "$d" | tail -n 2
+}
+
+# ---------------------------------------------------------------- get the data out first
+disks() { lsblk -dnpo NAME,SIZE,MODEL,TRAN | awk -v s="/dev/$isodisk" '$1 != s && $1 !~ /loop|ram|zram|sr/'; }
+mount_source() {   # a Windows or Linux partition, read-only -> $M
+  choose 'ntfs|BitLocker|ext4|ext3|xfs|btrfs|crypto_LUKS|vfat|exfat' || return 1; unlock || return 1
+  case "$PTYPE" in ntfs) ntfs-3g -o ro "$PART" $M ;; *) mount -o ro "$PART" $M ;; esac; }
+DEST=""
+choose_dest() {    # where rescued data goes: the stick, another USB disk, or a network share -> $DEST
+  echo " Save to:  1) this stick (KWICKDATA)   2) another disk / USB drive   3) a network share (SMB / Windows share)"
+  ask " Choose [1]: "; mkdir -p /mnt/kbdst
+  case "${REPLY:-1}" in
+    1) [ -d /kbdata ] && touch /kbdata/.kbw 2>/dev/null && rm -f /kbdata/.kbw && DEST=/kbdata/rescued || { echo " The stick is not writable."; return 1; } ;;
+    2) echo " Partitions on other disks:"; choose 'ntfs|ext4|exfat|vfat|xfs|btrfs' || return 1
+       case "$PTYPE" in ntfs) ntfs_rw "$PART" /mnt/kbdst ;; *) mount "$PART" /mnt/kbdst ;; esac || return 1; DEST=/mnt/kbdst/rescued ;;
+    3) net_up || return 1; ask " Share (e.g. //192.168.1.10/backup): "; sh=$REPLY; ask " User name (DOMAIN\\user or user): "; u=$REPLY
+       echo " Password:"; mount -t cifs "$sh" /mnt/kbdst -o "username=$u,vers=3.0,iocharset=utf8" || return 1; DEST=/mnt/kbdst/rescued ;;
+    *) return 1 ;;
+  esac
+  DEST="$DEST/$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -cd 'A-Za-z0-9-' | sed 's/^$/pc/')-$(date +%Y%m%d-%H%M)"
+  mkdir -p "$DEST" && echo " -> $DEST ($(df -h "$DEST" | awk 'NR==2{print $4}') free)"; }
+copy_files() {
+  line; echo " Copy a user's files off this PC (read-only on this PC's disk)."
+  mount_source || return
+  if [ -d $M/Users ]; then base=$M/Users; skip='^(Default|Default User|Public|All Users|desktop.ini)$'; else base=$M/home; skip='^$'; fi
+  [ -d "$base" ] || { echo " No Users / home folders on $PART."; umount $M; return; }
+  ls "$base" | grep -vE "$skip" | nl -w3 -s') ' | sed 's/^/ /'
+  ask " Whose files? (number, or name) "; U=$(ls "$base" | grep -vE "$skip" | sed -n "${REPLY}p" 2>/dev/null); [ -n "$U" ] || U=$REPLY
+  [ -d "$base/$U" ] || { echo " No such user."; umount $M; return; }
+  ask " 1) the usual folders (Desktop, Documents, Downloads, Pictures, Music, Videos, Favorites)   2) the whole profile  [1]: "; what=${REPLY:-1}
+  echo " $(du -sh "$base/$U" 2>/dev/null | cut -f1) in the whole profile."
+  choose_dest || { umount $M; return; }
+  if [ "$what" = 2 ]; then cp -a "$base/$U" "$DEST/" 2>/tmp/kbr-cp.err
+  else mkdir -p "$DEST/$U"; for f in Desktop Documents Downloads Pictures Music Videos Favorites; do
+    [ -d "$base/$U/$f" ] && { echo "   $f ($(du -sh "$base/$U/$f" | cut -f1))"; cp -a "$base/$U/$f" "$DEST/$U/" 2>>/tmp/kbr-cp.err; }; done; fi
+  n=$(wc -l < /tmp/kbr-cp.err 2>/dev/null || echo 0); sync
+  echo " Copied to $DEST$( [ "$n" -gt 0 ] && echo " - $n files could not be read (see $DEST/copy-errors.txt)")"
+  [ "$n" -gt 0 ] && cp /tmp/kbr-cp.err "$DEST/copy-errors.txt"; rm -f /tmp/kbr-cp.err
+  umount $M; mountpoint -q /mnt/kbdst && umount /mnt/kbdst; }
+clone_disk() {
+  line; echo " Clone a failing disk: copies everything readable first, then retries the bad areas (ddrescue)."
+  echo " Disks:"; disks | nl -w3 -s') ' | sed 's/^/ /'; ask " Source disk (number): "; src=$(disks | sed -n "${REPLY}p" | cut -d' ' -f1)
+  [ -b "$src" ] || return
+  ask " Copy to  1) another disk (ERASED)   2) an image file on the stick / a share  [2]: "
+  if [ "$REPLY" = 1 ]; then ask " Target disk (number): "; dst=$(disks | sed -n "${REPLY}p" | cut -d' ' -f1)
+    [ -b "$dst" ] && [ "$dst" != "$src" ] || { echo " No such disk."; return; }
+    echo " $dst ($(lsblk -dno SIZE,MODEL "$dst")) will be OVERWRITTEN with $src."; yes_typed || return
+    ddrescue -f -n "$src" "$dst" /tmp/kbr-clone.map && ddrescue -f -r3 "$src" "$dst" /tmp/kbr-clone.map
+  else choose_dest || return; img="$DEST/$(basename "$src").img"
+    ddrescue -n "$src" "$img" "$img.map" && ddrescue -r3 "$src" "$img" "$img.map"; fi
+  sync; echo " Done - the map file lists anything that stayed unreadable."; mountpoint -q /mnt/kbdst && umount /mnt/kbdst; }
+recover() {
+  line; echo " 1) Lost / deleted PARTITIONS: testdisk (finds them, writes a corrected table only when you tell it to)"
+  echo " 2) Deleted FILES: photorec (recovers by file type to another disk - never to the same disk)"
+  ask " Choose: "; case "$REPLY" in
+    1) testdisk /log /dev/null 2>/dev/null || testdisk ;;
+    2) choose_dest || return; (cd "$DEST" && photorec /d "$DEST/recovered" ); mountpoint -q /mnt/kbdst && umount /mnt/kbdst ;;
+  esac; }
+
+# ---------------------------------------------------------------- Windows that will not start
+win_mount_rw() { choose 'ntfs|BitLocker' || return 1; unlock || return 1
+  ntfs_rw "$PART" $M || return 1
+  [ -d "$M/Windows/System32/config" ] || { echo " No Windows on $PART."; umount $M; return 1; }; }
+win_disable() {
+  line; echo " Stop a driver or service from loading (blue-screen loops after a new driver / antivirus): Start = disabled."
+  win_mount_rw || return; H=$M/Windows/System32/config/SYSTEM
+  ask " Part of its name (e.g. nvlddmkm, avast, klif, a printer driver): "; pat=$REPLY; [ -n "$pat" ] || { umount $M; return; }
+  printf 'cd ControlSet001\\Services\nls\nq\n' | chntpw -e "$H" 2>/dev/null | sed -n 's/^ *<\(.*\)>$/\1/p' | grep -i -- "$pat" > /tmp/kbr-svc
+  [ -s /tmp/kbr-svc ] || { echo " Nothing matches '$pat'."; umount $M; return; }
+  nl -w3 -s') ' /tmp/kbr-svc | sed 's/^/ /'; ask " Which one? (number) "; svc=$(sed -n "${REPLY}p" /tmp/kbr-svc); [ -n "$svc" ] || { umount $M; return; }
+  echo " $svc -> disabled (Start = 4). A backup of the SYSTEM hive stays next to it; undo by setting Start back."; yes_typed || { umount $M; return; }
+  cp -a "$H" "$H.kwickboot-backup-$(date +%Y%m%d-%H%M%S)"
+  printf 'cd ControlSet001\\Services\\%s\ned Start\n4\nq\ny\n' "$svc" | chntpw -e "$H" >/tmp/kbr-reg.log 2>&1
+  sync; umount $M; echo " Done: $svc will not load at the next start."; }
+win_logs() {
+  line; echo " Collect crash and start-up information for support (minidumps, event logs, setup logs) - read-only."
+  mount_source || return; [ -d $M/Windows ] || { echo " No Windows on $PART."; umount $M; return; }
+  choose_dest || { umount $M; return; }; o="$DEST/windows-logs"; mkdir -p "$o"
+  for f in Minidump Panther Logs/CBS Logs/WindowsUpdate INF/setupapi.dev.log System32/winevt/Logs/System.evtx System32/winevt/Logs/Application.evtx \
+           System32/winevt/Logs/Setup.evtx System32/LogFiles/Srt/SrtTrail.txt; do
+    [ -e "$M/Windows/$f" ] && cp -a "$M/Windows/$f" "$o/" 2>/dev/null; done
+  du -sh "$o" | sed 's/^/ collected: /'; sync; umount $M; mountpoint -q /mnt/kbdst && umount /mnt/kbdst; }
+win_chkdsk() {
+  line; echo " Ask Windows to run a full disk check (chkdsk) at its next start (ntfsfix also clears common problems now)."
+  choose 'ntfs|BitLocker' || return; unlock || return; yes_typed || return; ntfsfix "$PART"; }
+bitlocker_id() {
+  line; echo " BitLocker recovery key ID - look the 48-digit key up with this ID (AD, Entra / Intune, aka.ms/myrecoverykey)."
+  n=0; for d in $(parts | awk '$2=="BitLocker"{print $1}'); do n=1
+    echo " $d ($(lsblk -dno SIZE "$d")):"; cryptsetup bitlkDump "$d" 2>/dev/null | grep -iE 'GUID|Description|Volume key' | sed 's/^/    /'; done
+  [ $n = 1 ] || echo " No BitLocker-encrypted partition on this PC."; }
+
+# ---------------------------------------------------------------- Linux that will not start
+fix_fstab() {
+  line; echo " /etc/fstab: find entries whose disk no longer exists (a common cause of 'emergency mode')."
+  choose 'ext4|ext3|xfs|btrfs|crypto_LUKS' || return; unlock || return; mount "$PART" $M || return
+  [ -f $M/etc/fstab ] || { echo " No /etc/fstab on $PART."; umount $M; return; }
+  : > /tmp/kbr-bad
+  grep -nE '^[^#[:space:]]' $M/etc/fstab | while IFS=: read -r n l; do s=$(echo "$l" | awk '{print $1}'); mp=$(echo "$l" | awk '{print $2}')
+    case "$s" in UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*) findfs "$s" >/dev/null 2>&1 || echo "$n $mp $s" >> /tmp/kbr-bad ;;
+                 /dev/*) [ -b "$s" ] || echo "$n $mp $s" >> /tmp/kbr-bad ;; esac; done
+  [ -s /tmp/kbr-bad ] || { echo " All entries point to existing disks."; umount $M; return; }
+  echo " Missing:"; sed 's/^/   line /' /tmp/kbr-bad
+  if awk '$2=="/"' /tmp/kbr-bad | grep -q .; then
+    new=$(blkid -o value -s UUID "$PART"); echo " The root (/) entry is wrong: it becomes UUID=$new (this partition)."
+  else echo " The missing entries get 'nofail' (the system starts without them; nothing is deleted)."; fi
+  yes_typed || { umount $M; return; }; cp -a $M/etc/fstab "$M/etc/fstab.kwickboot-backup-$(date +%Y%m%d-%H%M%S)"
+  while read -r n mp s; do
+    if [ "$mp" = / ]; then sed -i "${n}s|^[^[:space:]]*|UUID=$new|" $M/etc/fstab
+    else sed -i -E "${n}s/^([^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)([^[:space:]]+)/\\1\\2,nofail,x-systemd.device-timeout=5s/" $M/etc/fstab; fi
+  done < /tmp/kbr-bad; sync; umount $M; echo " Done (the old fstab is kept next to it)."; }
+initramfs_rebuild() {
+  line; echo " Rebuild the start-up image (initramfs) of an installed Linux - after storage / driver changes."
+  choose 'ext4|ext3|xfs|btrfs|crypto_LUKS' || return; unlock || return; mount_system || return; yes_typed || { cleanup; return; }
+  if chroot $M sh -c 'command -v update-initramfs' >/dev/null; then chroot $M update-initramfs -u -k all
+  elif chroot $M sh -c 'command -v dracut' >/dev/null; then chroot $M dracut -f --regenerate-all; else echo " No initramfs tool in that system."; fi
+  sync; cleanup; }
+linux_unlock() {
+  line; echo " Unlock a Linux account (locked / too many failed logins) and give it admin rights (sudo / wheel) again."
+  choose 'ext4|ext3|xfs|btrfs|crypto_LUKS' || return; unlock || return; mount "$PART" $M || return
+  ask " User: "; U=$REPLY; grep -q "^$U:" $M/etc/passwd || { echo " No such user."; umount $M; return; }
+  g=sudo; grep -q '^sudo:' $M/etc/group || g=wheel; echo " $U: unlock, reset failed logins, add to $g."; yes_typed || { umount $M; return; }
+  for d in dev proc sys; do mount --bind /$d $M/$d; done
+  chroot $M passwd -u "$U" 2>/dev/null; chroot $M usermod -aG "$g" "$U"; chroot $M sh -c "command -v faillock >/dev/null && faillock --user '$U' --reset" 2>/dev/null
+  sync; cleanup; echo " Done."; }
+
+# ---------------------------------------------------------------- firmware, hardware, time
+uefi_entries() {
+  line; [ -d /sys/firmware/efi ] || { echo " This PC started in legacy BIOS mode: no UEFI boot entries."; return; }
+  efibootmgr | sed 's/^/ /'
+  ask " 1) delete an entry   2) set the boot order   3) next start only: one entry   (Enter: back) "
+  case "$REPLY" in
+    1) ask " Entry number (e.g. 0003): "; [ -n "$REPLY" ] && yes_typed && efibootmgr -b "$REPLY" -B >/dev/null && echo " Deleted." ;;
+    2) ask " New order (e.g. 0001,0003,0000): "; [ -n "$REPLY" ] && efibootmgr -o "$REPLY" >/dev/null && echo " Saved." ;;
+    3) ask " Entry for the next start: "; [ -n "$REPLY" ] && efibootmgr -n "$REPLY" >/dev/null && echo " Set." ;;
+  esac; }
+hw_check() {
+  line; for d in $(disks | cut -d' ' -f1); do printf ' %-14s ' "$d"; smartctl -H "$d" 2>/dev/null | sed -n 's/.*\(result\|Status\): *//p' | head -n1 | sed 's/^$/no SMART/'; done
+  command -v sensors >/dev/null && sensors 2>/dev/null | grep -E '°C|RPM' | head -n 12 | sed 's/^/ /'
+  ask " 1) SMART short self-test of all disks   2) memory test (about 10 min)   (Enter: back) "
+  case "$REPLY" in
+    1) for d in $(disks | cut -d' ' -f1); do smartctl -t short "$d" >/dev/null 2>&1; done; echo " Started - results in about 2 minutes (choose this again)." ;;
+    2) mb=$(awk '/MemAvailable/{print int($2/1024*0.85)}' /proc/meminfo); memtester "${mb}M" 1 ;;
+  esac; }
+fix_clock() {
+  line; echo " Now: $(date)   (a wrong date breaks domain sign-in and HTTPS)"
+  ask " 1) from the network   2) type it   (Enter: back) "
+  case "$REPLY" in
+    1) net_up || return
+       if busybox ntpd -q -n -p pool.ntp.org 2>/dev/null; then :; else
+         d=$(wget -S --spider http://deb.debian.org 2>&1 | sed -n 's/^ *Date: //p' | head -n1); [ -n "$d" ] && date -s "$d" >/dev/null; fi ;;
+    2) ask " Date and time (YYYY-MM-DD HH:MM): "; date -s "$REPLY" >/dev/null || return ;;
+    *) return ;;
+  esac
+  ask " Is Windows installed on this PC (keeps the clock in local time)? [Y/n] "
+  if [ "$REPLY" = n ]; then hwclock -w -u; else hwclock -w -l; fi; echo " Clock set: $(date)"; }
+
+# ---------------------------------------------------------------- get help
+net_up() {
+  ip -4 route | grep -q default && return 0
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$n" up; done; sleep 3
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && udhcpc -i "$n" -q -n -t 5 >/dev/null 2>&1 && return 0; done
+  echo " No network (cable? DHCP?)."; return 1; }
+remote_help() {
+  line; echo " Let IT connect to this PC, remotely."
+  echo " 1) SSH: IT signs in to this rescue system   2) join a KwickBoot server (it shows up in the console)"
+  ask " Choose: "; net_up || return; ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  case "$REPLY" in
+    1) mkdir -p /root/.ssh; [ -s /kbdata/kwickboot/authorized_keys ] && cp /kbdata/kwickboot/authorized_keys /root/.ssh/authorized_keys
+       if [ -s /root/.ssh/authorized_keys ]; then how="with the SSH key on the stick"
+       else pw=$(tr -dc 'a-z' < /dev/urandom | head -c 4)-$(tr -dc '0-9' < /dev/urandom | head -c 4)-$(tr -dc 'a-z' < /dev/urandom | head -c 4)
+            printf 'root:%s\n' "$pw" | chpasswd 2>/dev/null; how="with the one-time password  $pw  (valid until this PC restarts)"; fi
+       mkdir -p /etc/dropbear; pkill dropbear 2>/dev/null; dropbear -R -p 22 2>/dev/null
+       echo; echo " Tell IT:   ssh root@$ip   $how"; echo " Press Enter to stop sharing."; read -r x; pkill dropbear; passwd -l root >/dev/null 2>&1 ;;
+    2) ask " KwickBoot server address (e.g. 192.168.1.10): "; s=$REPLY; [ -n "$s" ] || return
+       wget -q -O /tmp/agent.sh "http://$s:8080/scripts/agent.sh" || { echo " No KwickBoot server answers at $s."; return; }
+       KB_SERVER="$s:8080" sh /tmp/agent.sh >/tmp/kbr-agent.log 2>&1 &
+       echo " This PC ($ip) now appears in the console at https://$s:9443/ui/ - approve it there. Press Enter to stop."; read -r x; kill $! 2>/dev/null ;;
+  esac; }
+
+while :; do
+  if menu_fb; then :; else
+  clear 2>/dev/null; line; echo " KwickBoot Rescue - this PC's disks are only changed when you confirm"; line
+  lsblk -dno NAME,SIZE,MODEL | awk -v s="$isodisk" '$1 != s' | sed 's/^/   /'
+  cat <<'MENU'
+
+   Get the data out first          Windows                              Linux
+    1) Copy a user's files          5) Reset a local password           11) Set a new password
+    2) Clone a failing disk         6) Repair start-up (files, entry)   12) Repair start-up (GRUB)
+    3) Recover partitions / files   7) Stop a bad driver / service      13) Fix /etc/fstab
+    4) Open VeraCrypt / TrueCrypt   8) Collect crash info for support   14) Rebuild initramfs
+                                    9) Schedule a full chkdsk           15) Unlock account / sudo
+                                   10) Show BitLocker key ID
+   Disks, firmware, hardware       Help
+   16) Check / repair a file system 21) Let IT connect (SSH / KwickBoot server)
+   17) Partition table (GPT)        22) Shell (expert)
+   18) UEFI boot entries             0) Restart the PC
+   19) Hardware check (SMART, RAM, temperatures)
+   20) Fix the clock
+   23) Secure wipe - NIST SP 800-88 Rev. 2 (erases disks for good)
+MENU
+  ask " Choose: "
+  fi
+  case "$REPLY" in
+    1) copy_files ;; 2) clone_disk ;; 3) recover ;; 4) veracrypt_open ;;
+    5) win_password ;; 6) windows_boot_repair ;; 7) win_disable ;; 8) win_logs ;; 9) win_chkdsk ;; 10) bitlocker_id ;;
+    11) linux_password ;; 12) grub_repair ;; 13) fix_fstab ;; 14) initramfs_rebuild ;; 15) linux_unlock ;;
+    16) check_fs ;; 17) gpt_repair ;; 18) uefi_entries ;; 19) hw_check ;; 20) fix_clock ;; 21) remote_help ;;
+    22) echo " Exit the shell to come back."; PS1='rescue# ' sh -l ;; 23) sh /bin/kb-tools wipe ;; 0) sync; reboot -f ;;
+    back) echo " Returning to the boot menu..."; sync; reboot -f ;;
+  esac
+  cleanup; echo; ask " Press Enter for the menu."
+done

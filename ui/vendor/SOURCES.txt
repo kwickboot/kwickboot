@@ -1,0 +1,5 @@
+xterm.js 6.0.0 (MIT), @xterm/addon-fit 0.11.0 (MIT), noVNC 1.7.0 (MPL-2.0)
+From registry.npmjs.org, sha512 integrity verified 2026-11-03. Unmodified.
+os-icons.json: 19 OS logos (title, brand colour, 24x24 path) extracted from simple-icons 16.36.0 (CC0-1.0),
+  registry.npmjs.org/simple-icons/-/simple-icons-16.36.0.tgz, sha512 integrity verified 2026-11-03; each SVG checked to
+  contain only <title> and one <path>. The logos are trademarks of their owners, used only to identify their systems.

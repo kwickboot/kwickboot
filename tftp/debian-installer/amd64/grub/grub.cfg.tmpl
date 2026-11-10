@@ -1,0 +1,61 @@
+# KwickBoot boot menu (rendered from grub.cfg.tmpl at server start)
+set timeout=8
+# if the server's per-machine config can't be fetched, the menu below starts the INSTALLED SYSTEM after the timeout:
+# an installed PC with the network first in its boot order must still start normally (the RAM OS is one key away)
+set default=1
+insmod all_video
+insmod part_gpt
+insmod fat
+insmod chain
+
+# No console selection: the server generates a per-machine config with the decided action
+# (alpine / local / debian13 / iPXE actions). If it returns "not found" (action=menu, or an
+# unknown machine with discovery closed), the full menu below is shown instead.
+insmod http
+if [ -n "$net_default_mac" ]; then
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg
+    # a second try: right after a restart the network can drop the first request
+    sleep 2
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg
+fi
+
+menuentry 'Load KwickBoot to RAM - inspect / rescue / install remotely  (does NOT touch disks)' {
+    # generated on the server (adds the per-boot agent token)
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg?force=alpine
+}
+
+menuentry 'Start the installed system (local disk)' {
+    # run the installed system's own GRUB config (chainloading a disk shim from a network-loaded GRUB fails)
+    insmod ext2
+    insmod btrfs
+    insmod xfs
+    if search --no-floppy --file --set=diskroot /boot/grub/grub.cfg; then
+        set root=$diskroot
+        set prefix=($diskroot)/boot/grub
+        configfile /boot/grub/grub.cfg
+    fi
+    if search --no-floppy --file --set=diskroot /grub/grub.cfg; then
+        set root=$diskroot
+        set prefix=($diskroot)/grub
+        configfile /grub/grub.cfg
+    fi
+    # anything else (Windows, BSD, appliances): back to the firmware, which boots the next boot entry = the local disk
+    # (chainloading from a network-loaded GRUB makes those loaders look for their files on the network card)
+    echo "KwickBoot: handing over to the firmware - next boot entry (local disk)"
+    exit 1
+}
+
+menuentry 'KwickBoot tools (iPXE: memory test, ISO library, Windows, netboot.xyz) - Secure Boot off' {
+    chainloader /ipxe/ipxe.efi
+}
+
+submenu 'Installers (WIPE the target disk) >' {
+    menuentry 'Debian 13 installer - interactive (asks every question)' {
+        linux /debian-installer/amd64/linux netcfg/link_wait_timeout=30 firmware_class.path=/fw ---
+        initrd /debian-installer/amd64/initrd-fw.gz
+    }
+    menuentry 'Debian 13 installer - UNATTENDED preseed (wipes first disk!)' {
+        linux /debian-installer/amd64/linux auto=true priority=critical url=http://{{SERVER_IP}}:{{HTTP_PORT}}/preseed-debian13.cfg netcfg/link_wait_timeout=30 netcfg/dhcp_timeout=60 firmware_class.path=/fw ---
+        initrd /debian-installer/amd64/initrd-fw.gz
+    }
+}

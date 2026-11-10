@@ -1,0 +1,9 @@
+# KwickBoot SAN (san.py): let the pxe-toolkit service user manage the iSCSI target and the zvol backstore.
+# tgtadm/zfs need root; the service runs as the unprivileged `pxe` user, so grant exactly these two tools.
+#
+# Install:
+#   sudo cp linux/kwickboot-san.sudoers /etc/sudoers.d/kwickboot-san
+#   sudo chmod 440 /etc/sudoers.d/kwickboot-san
+#   sudo visudo -cf /etc/sudoers.d/kwickboot-san     # syntax check
+# Flat-file backstore needs only tgtadm; zvol also needs zfs.
+pxe ALL=(root) NOPASSWD: /usr/sbin/tgtadm, /usr/bin/tgtadm, /usr/sbin/zfs, /usr/bin/zfs

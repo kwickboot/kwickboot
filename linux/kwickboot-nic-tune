@@ -1,0 +1,18 @@
+#!/bin/sh
+# KwickBoot server: network cards ready for large transfers - ring buffers to the card's maximum (fewer drops at full
+# speed), offloads on. Runs once at boot (kwickboot-nic-tune.service). Only touches physical wired cards.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+command -v ethtool >/dev/null || exit 0
+modprobe -q tcp_bbr 2>/dev/null || true              # BBR (kwickboot-net.conf) when the kernel has it as a module
+for n in /sys/class/net/*; do
+  i=${n##*/}
+  [ -e "$n/device" ] || continue                     # virtual (bridges, wg, docker): leave alone
+  [ -d "$n/wireless" ] && continue
+  rx=$(ethtool -g "$i" 2>/dev/null | awk '/Pre-set maximums/{m=1} m && /^RX:/{print $2; exit}')
+  tx=$(ethtool -g "$i" 2>/dev/null | awk '/Pre-set maximums/{m=1} m && /^TX:/{print $2; exit}')
+  [ -n "$rx" ] && [ "$rx" != n/a ] && ethtool -G "$i" rx "$rx" 2>/dev/null
+  [ -n "$tx" ] && [ "$tx" != n/a ] && ethtool -G "$i" tx "$tx" 2>/dev/null
+  for o in tso gso gro sg rx tx; do ethtool -K "$i" "$o" on 2>/dev/null; done
+  echo "$i: rings rx=${rx:-?} tx=${tx:-?}, offloads on"
+done
+exit 0

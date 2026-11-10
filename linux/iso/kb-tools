@@ -1,0 +1,54 @@
+#!/bin/sh
+# KwickBoot stick tools: secure wipe and rescue shell (KwickBoot RAM OS - nothing is installed, nothing is written
+# except what you confirm). SPDX-License-Identifier: AGPL-3.0-or-later
+#   kb-tools wipe | rescue
+line() { echo "------------------------------------------------------------------------------"; }
+# the stick's data partition, writable (wipe reports, rescued files)
+kbdata_rw() { kd=$(cat /run/kb-data-dev 2>/dev/null); [ -n "$kd" ] || return 1
+  mountpoint -q /kbdata && umount /kbdata; mount -t "$(blkid -o value -s TYPE "$kd")" "$kd" /kbdata 2>/dev/null; }
+isodev=$(cat /run/kb-iso-dev 2>/dev/null); isodisk=$(lsblk -no PKNAME "$isodev" 2>/dev/null | head -n1); [ -z "$isodisk" ] && isodisk=$(basename "$isodev")
+serial_of() { n=$(basename "$1"); s=$(lsblk -dno SERIAL "$1" 2>/dev/null | tr -d ' ')
+  for f in /sys/block/$n/serial /sys/block/$n/device/serial; do [ -z "$s" ] && [ -r "$f" ] && s=$(tr -d ' \n' < "$f"); done
+  [ -n "$s" ] || s="size-$(lsblk -dno SIZE "$1" | tr -d ' ')"; echo "$s"; }
+
+case "$1" in
+wipe)
+  clear 2>/dev/null; line; echo " KwickBoot secure wipe (NIST SP 800-88 Rev. 2: purge with the strongest technique each disk supports, verified)"; line
+  echo " The disks you choose are ERASED for good - there is no undo. The stick itself is never listed."
+  echo; i=0; : > /tmp/kb-wdisks
+  for d in $(lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}'); do
+    n=$(basename "$d"); [ "$n" = "$isodisk" ] && continue
+    case "$n" in loop*|ram*|zram*|sr*) continue ;; esac
+    i=$((i + 1)); echo "$i $d" >> /tmp/kb-wdisks
+    printf ' %d) %-12s %8s  %-28s serial %s%s\n' "$i" "$d" "$(lsblk -dno SIZE "$d" | tr -d ' ')" "$(lsblk -dno MODEL "$d" | cut -c1-28)" \
+      "$(serial_of "$d")" "$( [ "$(lsblk -dno TRAN "$d")" = usb ] && echo '  (USB)')"
+  done
+  [ "$i" -gt 0 ] || { echo " No disk to wipe."; exit 0; }
+  echo; printf ' Wipe which disks? (numbers, e.g. 1 2): '; read -r sel
+  DISKS=""; CONF=""
+  for n in $sel; do d=$(awk -v n="$n" '$1==n{print $2}' /tmp/kb-wdisks); [ -n "$d" ] || { echo " No disk $n."; exit 1; }
+    s=$(serial_of "$d"); echo " $d: $(lsblk -dno SIZE,MODEL "$d") - serial $s"
+    printf ' Type its serial (%s) to confirm it will be ERASED: ' "$s"; read -r r; [ "$r" = "$s" ] || { echo " Not confirmed - nothing was changed."; exit 1; }
+    DISKS="${DISKS:+$DISKS+}$d"; CONF="${CONF:+$CONF+}$s"
+  done
+  [ -n "$DISKS" ] || exit 0
+  printf ' Type WIPE to start: '; read -r r; [ "$r" = WIPE ] || { echo " Cancelled - nothing was changed."; exit 1; }
+  t0=$(date +%s)
+  W=/iso/http/scripts/wipe.sh                  # from the stick, or - network-booted - from the KwickBoot server
+  [ -f "$W" ] || { W=/tmp/wipe.sh; wget -q -O $W "http://$KB_SERVER/scripts/wipe.sh" || { echo " Cannot fetch the wipe tool from $KB_SERVER."; exit 1; }; }
+  DISKS="$DISKS" CONFIRMS="$CONF" sh $W 2>&1 | tee /tmp/kb-wipe.log
+  # the report: on the stick (KWICKDATA/wipe-reports) - a KwickBoot server signs certificates for wipes it runs itself
+  ms=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -cd 'A-Za-z0-9-'); f="wipe-$(date +%Y%m%d-%H%M%S)-${ms:-pc}.txt"
+  if kbdata_rw; then mkdir -p /kbdata/wipe-reports
+    { echo "KwickBoot secure wipe report (unsigned - made on the PC by the KwickBoot stick, $(date))"
+      echo "PC: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) $(cat /sys/class/dmi/id/product_name 2>/dev/null) serial ${ms:-?}"
+      echo "Duration: $(( $(date +%s) - t0 )) s"; grep -E '^WIPECERT|FAILED|verify' /tmp/kb-wipe.log; } > /kbdata/wipe-reports/$f
+    sync; echo; echo " Report saved on the stick: wipe-reports\\$f"
+  else echo; echo " (No KWICKDATA partition - the report is only on screen; full log /tmp/kb-wipe.log)"; fi
+  grep -q FAILED /tmp/kb-wipe.log && { echo " At least one disk FAILED verification - do not hand it over."; exit 1; }
+  exit 0 ;;
+rescue)                       # guided repairs: passwords, boot, file systems, partition tables (kb-rescue)
+  kbdata_rw >/dev/null 2>&1 || true
+  exec sh /bin/kb-rescue ;;
+*) echo "usage: kb-tools wipe|rescue"; exit 1 ;;
+esac

@@ -1,0 +1,15 @@
+#!/bin/sh
+# KwickBoot initramfs step (init-bottom), loaded as an extra initrd next to iXsystems' unmodified TrueNAS installer.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Only when KwickBoot booted the installer (kb_disk= on the command line): adds the unattended-install service to the
+# live system in RAM and replaces the interactive console menu with a progress view, so nobody races the install.
+[ "$1" = prereqs ] && { echo ""; exit 0; }
+grep -q 'kb_disk=' /proc/cmdline || exit 0
+R=${rootmnt:-/root}
+mkdir -p $R/usr/local/sbin $R/etc/systemd/system/multi-user.target.wants
+cp /kb/kb-truenas-install $R/usr/local/sbin/kb-truenas-install && chmod 755 $R/usr/local/sbin/kb-truenas-install
+cp /kb/kb-truenas.service $R/etc/systemd/system/kb-truenas.service
+ln -sf /etc/systemd/system/kb-truenas.service $R/etc/systemd/system/multi-user.target.wants/kb-truenas.service
+printf '#!/bin/sh\necho "KwickBoot is installing TrueNAS on this machine (progress also in the KwickBoot web console)."\nexec journalctl -f -o cat -u kb-truenas\n' \
+  > $R/root/.bash_profile
+exit 0

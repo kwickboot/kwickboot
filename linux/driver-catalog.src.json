@@ -1,0 +1,143 @@
+{
+  "schema": 2,
+  "_note": "KwickBoot universal device->driver INDEX (schema v2). Entries key on bus-prefixed ids (pci:/usb:/dmi:) + arch + target; boot method (PXE or USB loader) is irrelevant. Index holds POINTERS; packs live on vendor servers or our mirror. origin+license kept on every entry. Edit linux/driver-catalog.src.json; sign+publish via build-driver-catalog.sh.",
+  "packs": [
+    {
+      "name": "linux-firmware-rtl8168h",
+      "class": "network",
+      "ids": [
+        "pci:10EC:8168"
+      ],
+      "target": "linux",
+      "kind": "firmware",
+      "files": [
+        "rtl_nic/rtl8168h-2.fw"
+      ],
+      "url": "https://download.kwickboot.com/compat/fw/rtl_nic/rtl8168h-2.fw",
+      "sha256": "0b4beab008e308f28296c13188ee23edfeff7d865e398a7ade170495c8cec7e6",
+      "origin": "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_nic/rtl8168h-2.fw",
+      "license": "linux-firmware (redistributable)",
+      "note": "Realtek RTL8168H NIC firmware; MIRRORED to our CDN (option C)."
+    },
+    {
+      "name": "dell-latitude-3550-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0C98",
+        "dmi:DELL:0C9A"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14939351M/1/Latitude-3550-MVKJ4_Win11_1.0_A10.exe",
+      "sha256": "40b4d29035b66eecb9e5173f0aa28912bf4e1bf3153bdee9184f9facc14c11c3",
+      "origin": "https://downloads.dell.com/FOLDER14939351M/1/Latitude-3550-MVKJ4_Win11_1.0_A10.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 2788669728,
+      "note": "Latitude 3550 - Dell Win11 x64 driver pack MVKJ4 (2026-10-13)"
+    },
+    {
+      "name": "dell-latitude-3450-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0C97",
+        "dmi:DELL:0C99"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14940398M/1/Latitude-3450-FMHN4_Win11_1.0_A10.exe",
+      "sha256": "d3b0c681b807326b9eeb3e4e69ee5f5782c9bd9f781bff83fa09de1d3461c312",
+      "origin": "https://downloads.dell.com/FOLDER14940398M/1/Latitude-3450-FMHN4_Win11_1.0_A10.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 2622115984,
+      "note": "Latitude 3450 - Dell Win11 x64 driver pack FMHN4 (2026-10-13)"
+    },
+    {
+      "name": "dell-latitude-7350-detachable-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0C64",
+        "dmi:DELL:0DAA"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14949054M/1/Latitude-7350-Detachable-6YWN7_Win11_1.0_A10.exe",
+      "sha256": "568c908ae977114ed8d3537ca4345fc15e09b9d990b16744bd66e99e8f6d246d",
+      "origin": "https://downloads.dell.com/FOLDER14949054M/1/Latitude-7350-Detachable-6YWN7_Win11_1.0_A10.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 1225220936,
+      "note": "Latitude 7350 Detachable - Dell Win11 x64 driver pack 6YWN7 (2026-10-13)"
+    },
+    {
+      "name": "dell-dell-pro-precision-5-14s-pw514265-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0E26"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14819870M/1/PW514265-MJ98T_Win11_1.0_A01.exe",
+      "sha256": "5421ca20a62d08f788a3ef9b132a9a1ee758e5130b7b820fdfd609caa2365ba9",
+      "origin": "https://downloads.dell.com/FOLDER14819870M/1/PW514265-MJ98T_Win11_1.0_A01.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 1057125688,
+      "note": "Dell Pro Precision 5 14S PW514265 - Dell Win11 x64 driver pack MJ98T (2026-09-22)"
+    },
+    {
+      "name": "dell-latitude-7350-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0CBD",
+        "dmi:DELL:0CBE",
+        "dmi:DELL:0CBF",
+        "dmi:DELL:0CC0"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14509408M/1/Latitude-7350-4CRFW_Win11_1.0_A10.exe",
+      "sha256": "5e3fbcaae0aff9f6d9f96357399d9d9a86d586fddf7604f8fbbba20ad7bcc9ea",
+      "origin": "https://downloads.dell.com/FOLDER14509408M/1/Latitude-7350-4CRFW_Win11_1.0_A10.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 1980805920,
+      "note": "Latitude 7350 - Dell Win11 x64 driver pack 4CRFW (2026-09-22)"
+    },
+    {
+      "name": "dell-dell-pro-precision-5-16s-pw516265-win11",
+      "class": "system-pack",
+      "vendor": "Dell",
+      "ids": [
+        "dmi:DELL:0E28"
+      ],
+      "arch": [
+        "x86_64"
+      ],
+      "target": "win",
+      "kind": "inf",
+      "url": "https://downloads.dell.com/FOLDER14830112M/1/PW516265-T5RD1_Win11_1.0_A01.exe",
+      "sha256": "c8ac2e8d9862cc8c840be4a7688543df0546c949d826f32b2674742aec0f457f",
+      "origin": "https://downloads.dell.com/FOLDER14830112M/1/PW516265-T5RD1_Win11_1.0_A01.exe",
+      "license": "Dell EULA (redistribution restricted - pointer only)",
+      "size": 1057115752,
+      "note": "Dell Pro Precision 5 16S PW516265 - Dell Win11 x64 driver pack T5RD1 (2026-09-22)"
+    }
+  ]
+}

@@ -1,0 +1,155 @@
+#!/usr/bin/python3
+"""KwickBoot: unattended TrueNAS install, run INSIDE iXsystems' own installer environment (network-booted, unmodified).
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+Started by kb-truenas.service (put in place by the kb-truenas initramfs step) only when the kernel command line carries
+kb_server= and kb_disk=<serial>. Steps:
+  1. TrueNAS-SCALE.update (the system itself, normally on the USB stick) from the KwickBoot server into RAM as /cdrom,
+     SHA-256 checked against the server's list
+  2. the target disk by its SERIAL - exactly one match, else stop (the RAM OS already checked the same serial)
+  3. iXsystems' installer API on 127.0.0.1:8080: adopt it first (locks it against anyone else on the LAN), then install
+     with no password (the owner creates the admin login in the TrueNAS web UI)
+  4. report to KwickBoot, reboot into the installed TrueNAS
+"""
+import asyncio, glob, hashlib, json, os, re, subprocess, time, urllib.request
+
+CMD = dict(w.split("=", 1) for w in open("/proc/cmdline").read().split() if "=" in w)
+SRV, SERIAL, TOKEN = CMD.get("kb_server", ""), CMD.get("kb_disk", ""), CMD.get("pxetoken", "")
+LOG = []
+
+
+def log(msg):
+    line = time.strftime("%H:%M:%S ") + msg
+    LOG.append(line)
+    print(line, flush=True)
+    try:
+        with open("/dev/tty1", "w") as t:
+            t.write("KwickBoot: " + msg + "\n")
+    except OSError:
+        pass
+
+
+def mac():
+    for line in open("/proc/net/route").read().splitlines()[1:]:
+        f = line.split()
+        if f[1] == "00000000":
+            return open(f"/sys/class/net/{f[0]}/address").read().strip()
+    return ""
+
+
+def post(path, body=b""):
+    try:
+        req = urllib.request.Request(f"http://{SRV}{path}&mac={mac()}", data=body, headers={"X-PXE-Token": TOKEN})
+        urllib.request.urlopen(req, timeout=20).read()
+    except Exception as e:      # reporting must never stop the install
+        print("report failed:", e, flush=True)
+
+
+def state(st, msg):
+    post(f"/agent/hello?state={st}", msg.encode()[:200])
+
+
+def fetch_update():
+    sums = urllib.request.urlopen(f"http://{SRV}/truenas/SHA256SUMS", timeout=30).read().decode()
+    want = {l.split()[1].lstrip("*"): l.split()[0] for l in sums.splitlines() if len(l.split()) == 2}["TrueNAS-SCALE.update"]
+    os.makedirs("/cdrom", exist_ok=True)
+    if not os.path.ismount("/cdrom"):
+        subprocess.run(["mount", "-t", "tmpfs", "-o", "size=4g,mode=0755", "tmpfs", "/cdrom"], check=True)
+    h, n, t0 = hashlib.sha256(), 0, time.time()
+    with urllib.request.urlopen(f"http://{SRV}/truenas/TrueNAS-SCALE.update", timeout=60) as r, \
+            open("/cdrom/TrueNAS-SCALE.update.part", "wb") as f:
+        while chunk := r.read(4 << 20):
+            h.update(chunk); f.write(chunk); n += len(chunk)
+    if h.hexdigest() != want:
+        os.remove("/cdrom/TrueNAS-SCALE.update.part")
+        raise RuntimeError("TrueNAS-SCALE.update CHECKSUM MISMATCH - refused")
+    os.rename("/cdrom/TrueNAS-SCALE.update.part", "/cdrom/TrueNAS-SCALE.update")
+    log(f"system image {n // 1000000} MB from the server, sha256 OK ({int(time.time() - t0)} s)")
+
+
+def disk_by_serial():
+    subprocess.run(["udevadm", "settle"])
+    hits = []
+    for d in glob.glob("/sys/block/*"):
+        name = os.path.basename(d)
+        if name.startswith(("loop", "sr", "dm-", "md", "zram", "ram")):
+            continue
+        s = ""
+        try:
+            s = subprocess.run(["lsblk", "-dno", "SERIAL", f"/dev/{name}"], capture_output=True, text=True).stdout.strip()
+        except OSError:
+            pass
+        if not s and os.path.exists(f"{d}/device/vpd_pg80"):        # SATA without udev data
+            s = re.sub(r"[^A-Za-z0-9._-]", "", open(f"{d}/device/vpd_pg80", "rb").read()[4:].decode(errors="ignore"))
+        if not s and os.path.exists(f"{d}/device/serial"):          # NVMe
+            s = open(f"{d}/device/serial").read().strip()
+        if s == SERIAL:
+            hits.append(name)
+    if len(hits) != 1:
+        raise RuntimeError(f"disk with serial {SERIAL!r}: {len(hits)} matches {hits} - need exactly one, nothing written")
+    log(f"target disk /dev/{hits[0]} (serial {SERIAL})")
+    return hits[0]
+
+
+async def install(disk):
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        for _ in range(60):                      # the installer service may still be starting
+            try:
+                ws = await s.ws_connect("http://127.0.0.1:8080/ws", heartbeat=30)
+                break
+            except aiohttp.ClientError:
+                await asyncio.sleep(2)
+        else:
+            raise RuntimeError("TrueNAS installer API not reachable on 127.0.0.1:8080")
+        rid = 0
+
+        async def call(method, *params):
+            nonlocal rid
+            rid += 1
+            await ws.send_str(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": list(params)}))
+            last = -1
+            async for m in ws:
+                d = json.loads(m.data)
+                if d.get("method") == "installation_progress":
+                    p = d["params"][0]
+                    pct = int(p.get("progress", 0) * 100)
+                    if pct >= last + 10 or pct == 100:
+                        last = pct
+                        log(f"install {pct}%: {p.get('message', '')}")
+                        state("busy", f"TrueNAS install {pct}%")
+                    continue
+                if d.get("id") == rid:
+                    if d.get("error"):
+                        raise RuntimeError(f"{method}: {d['error'].get('message')}")
+                    return d.get("result")
+            raise RuntimeError(f"{method}: connection closed")
+
+        await call("adopt")                      # from now on only this connection may drive the installer
+        log("installer API adopted by KwickBoot (locked for others)")
+        await call("install", {"disks": [disk], "set_pmbr": not os.path.isdir("/sys/firmware/efi"), "authentication": None})
+
+
+def main():
+    if not (SRV and SERIAL):
+        return
+    state("busy", "TrueNAS installer started, fetching the system image")
+    try:
+        fetch_update()
+        disk = disk_by_serial()
+        state("busy", f"installing TrueNAS onto {disk}")
+        asyncio.run(install(disk))
+        log("INSTALL OK: TrueNAS installed - rebooting into it")
+        post("/report?kind=truenas", "\n".join(LOG).encode())
+        state("rebooting", "TrueNAS installed, rebooting into it")
+        subprocess.run(["sync"])
+        time.sleep(3)
+        subprocess.run(["systemctl", "reboot"])
+    except Exception as e:
+        log(f"STOP: {e}")
+        post("/report?kind=truenas", "\n".join(LOG).encode())
+        state("failed", f"TrueNAS install failed: {str(e)[:150]}")
+
+
+if __name__ == "__main__":
+    main()

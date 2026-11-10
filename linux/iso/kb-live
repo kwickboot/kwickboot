@@ -1,0 +1,148 @@
+#!/bin/sh
+# KwickBoot live: run the KwickBoot server from the stick / ISO in RAM - nothing is written to this PC's disks.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Prepares /newroot (the server image from the ISO + the release + a start service); init then switch_roots into it.
+# In the live system kwickboot-live.service keeps the server's state on the stick (KWICKDATA/kwickboot/state.img),
+# serves the stick's KWICKDATA/iso and /images as the ISO and image library, and (re)installs KwickBoot into RAM.
+cfg() { sed -n "s/^$1=//p" /run/kb-stick.conf 2>/dev/null | head -n1; }
+mem=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+echo; echo "KwickBoot live: the server runs from RAM ($mem MB) - nothing is written to this PC's disks."
+# the unpacked server (~800 MB) + the running system live in RAM: below ~2.9 GB the unpack itself runs out of memory
+# (kernel OOM panic), so stop here with a clear message instead - init starts the installer instead
+if [ "$mem" -lt 2900 ]; then
+  echo "NOT ENOUGH MEMORY for KwickBoot live: this PC has $mem MB, live needs at least 3 GB (4 GB with the local screen)."
+  echo "Install KwickBoot onto this PC instead, or use a PC with more memory."; exit 1
+fi
+[ "$mem" -ge 3800 ] || echo "WARNING: only $mem MB RAM - KwickBoot live wants 4 GB (about 3 GB without the local screen: menu entry text only / kb_gui=0)."
+R=/newroot; mkdir -p $R
+mount -t tmpfs -o size=85%,mode=755 kblive $R || { echo "no RAM disk"; exit 1; }
+echo "Unpacking the server (about 800 MB)..."
+zstd -dc -T0 /iso/http/images/kbserver.tar.zst | tar -x --xattrs --xattrs-include='*' --acls --numeric-owner -C $R \
+  || { if dmesg 2>/dev/null | grep -qi 'out of memory'; then echo "unpacking the server ran out of memory ($mem MB RAM)"
+       else echo "the server image on the stick is damaged (re-create the stick)"; fi; umount $R; exit 1; }
+[ -x $R/lib/systemd/systemd ] || [ -x $R/usr/lib/systemd/systemd ] || { echo "no systemd in the image"; umount $R; exit 1; }
+
+# identity, time, network (the stick's kwickboot.cfg, else DHCP), root on RAM
+HN=$(cfg host); HN=${HN:-kwickboot-live}; TZN=$(cfg timezone); TZN=${TZN:-UTC}
+echo "$HN" > $R/etc/hostname; printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' "$HN" > $R/etc/hosts
+[ -f "$R/usr/share/zoneinfo/$TZN" ] && { ln -sf "/usr/share/zoneinfo/$TZN" $R/etc/localtime; echo "$TZN" > $R/etc/timezone; }
+printf 'tmpfs /tmp tmpfs defaults,noatime,size=512m 0 0\n' > $R/etc/fstab
+mkdir -p $R/etc/systemd/network
+if [ "$(cfg network)" = static ] && [ -n "$(cfg address)" ]; then
+  { printf '[Match]\nName=en* eth*\n\n[Network]\nAddress=%s\nGateway=%s\n' "$(cfg address)" "$(cfg gateway)"
+    for d in $(cfg dns | tr ',' ' '); do echo "DNS=$d"; done; } > $R/etc/systemd/network/20-wired.network
+else printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nClientIdentifier=mac\n' > $R/etc/systemd/network/20-wired.network; fi
+# NIC firmware the RAM OS brought (the image has only the free firmware)
+[ -d /lib/firmware ] && { mkdir -p $R/usr/lib/firmware; cp -an /lib/firmware/. $R/usr/lib/firmware/ 2>/dev/null; }
+# SSH key-only (no keys on a stick), root locked: the console is the web UI
+mkdir -p $R/root/.ssh; echo "# KwickBoot live: add SSH public keys for root here" > $R/root/.ssh/authorized_keys; chmod 600 $R/root/.ssh/authorized_keys
+mkdir -p $R/etc/ssh/sshd_config.d
+printf 'PermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nX11Forwarding no\n' > $R/etc/ssh/sshd_config.d/10-hardening.conf
+sed -i 's#^root:[^:]*:#root:!:#' $R/etc/shadow
+
+# the release + the start service
+mkdir -p $R/opt/kwickboot-setup
+tar -xzf /iso/http/release/kwickboot.tar.gz -C $R/opt/kwickboot-setup || { echo "release missing on the stick"; umount $R; exit 1; }
+rel=$(ls -d $R/opt/kwickboot-setup/kwickboot-* | head -n1)
+if [ -d /iso/http/runtime/http/kbcore ]; then
+  mkdir -p "$rel/http"
+  cp -a /iso/http/runtime/http/kbcore* "$rel/http/" || { echo "Core restore failed"; umount $R; exit 1; }
+fi
+if [ -d /iso/tools ]; then
+  mkdir -p "$rel/http/images/tools"
+  for d in /iso/tools/*; do [ -d "$d" ] && cp -a "$d" "$rel/http/images/tools/"; done
+fi
+[ -d "$rel/http/kbcore" ] || { echo "KwickBoot Core missing from the stick"; umount $R; exit 1; }
+cat > $R/usr/local/sbin/kwickboot-live <<'LIVE'
+#!/bin/sh
+# KwickBoot live start: state on the stick, the stick's ISOs as the library, KwickBoot installed into RAM and started
+L=/var/log/kwickboot-live.log; exec >>$L 2>&1; echo "== $(date)"
+# the login screen (/etc/issue) tells the person at this PC what is happening and what to do next - redrawn on change
+issue() { [ "$1" = "${LAST:-}" ] && return 0; LAST=$1
+  { printf '\033[H\033[2J'
+    echo "================================================================================"
+    echo "  KwickBoot live - running from the USB stick. Nothing is installed on this PC."
+    echo "================================================================================"
+    echo; printf '%s\n' "$1"; echo
+    echo "  To install KwickBoot onto this PC instead: restart, then choose \"Install\" in the stick menu."
+    echo "  (This login prompt is not needed: everything is done in the web console.)"; echo
+  } > /etc/issue
+  agetty --reload 2>/dev/null || true; }
+T=/opt/pxe-toolkit; ST=/var/lib/kwickboot-state
+id pxe >/dev/null 2>&1 || useradd --system --home-dir $T --no-create-home --shell /usr/sbin/nologin pxe
+mkdir -p $T/http/iso $T/http/images $T/data $T/machines $T/logs $ST
+WHERE="Settings are lost at shutdown (no KWICKDATA partition)"
+D=$(blkid -l -t LABEL=KWICKDATA -o device 2>/dev/null)
+if [ -n "$D" ] && ! mountpoint -q /mnt/kwickdata; then
+  mkdir -p /mnt/kwickdata
+  if mount -t exfat -o rw,uid=$(id -u pxe),gid=$(id -g pxe),dmask=022,fmask=133 "$D" /mnt/kwickdata; then
+    K=/mnt/kwickdata; mkdir -p $K/kwickboot $K/iso $K/images
+    # server state (database, keys, machines, logs) in one Linux file system on the stick - exFAT has no owners
+    if [ ! -f $K/kwickboot/state.img ]; then
+      issue "creating its settings file on the stick (1 GB, once)..."
+      fallocate -l 1G $K/kwickboot/state.img 2>/dev/null || dd if=/dev/zero of=$K/kwickboot/state.img bs=4M count=256 status=none
+      mkfs.ext4 -q -F -L KBSTATE $K/kwickboot/state.img
+    fi
+    mount -o loop $K/kwickboot/state.img $ST && WHERE="Settings are kept on the stick"
+    mount --bind $K/iso $T/http/iso; mount --bind $K/images $T/http/images
+    # IT access: SSH keys put on the stick (KWICKDATA/kwickboot/authorized_keys) - key-only, as on every KwickBoot server
+    [ -s $K/kwickboot/authorized_keys ] && tr -d '' < $K/kwickboot/authorized_keys > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+    # support log on the stick (send it to us): the KwickBoot services' log, refreshed for the first 10 minutes
+    ( for i in $(seq 1 20); do sleep 30; journalctl -b --no-pager -u kwickboot-live -u kwickboot-screen -u kwickboot-screen-state -u pxe-toolkit         > $K/kwickboot/last-boot.log 2>&1; cat /var/log/kwickboot-live.log >> $K/kwickboot/last-boot.log 2>/dev/null; sync; done ) &
+  fi
+fi
+mkdir -p $ST/data $ST/machines $ST/logs $ST/ssh
+for d in data machines logs; do mountpoint -q $T/$d || mount --bind $ST/$d $T/$d; done
+ln -sfn $ST/config.json $T/config.json
+if ls $ST/ssh/ssh_host_*key >/dev/null 2>&1; then cp -p $ST/ssh/ssh_host_* /etc/ssh/; else ssh-keygen -A; cp -p /etc/ssh/ssh_host_* $ST/ssh/; fi
+systemctl try-restart ssh 2>/dev/null || true
+until ip -4 route show default | grep -q . && ip -4 -o addr show scope global | grep -q .; do
+  issue "  WAITING FOR THE NETWORK - plug in the network cable. The PC needs an address from your DHCP server
+  (or set a static address in kwickboot.cfg on the stick). The server starts as soon as it has one."; sleep 5; done
+issue "  Starting the KwickBoot server (about half a minute)..."
+rel=$(ls -d /opt/kwickboot-setup/kwickboot-* | head -n1)
+if sh "$rel/install.sh" --offline --yes --firewall; then
+  # the first-run setup code exists only while there is no admin: wait until the console has made it (or an admin exists)
+  c=""; for i in $(seq 1 60); do o=$(/usr/local/sbin/pxectl setup-code 2>/dev/null)
+    c=$(echo "$o" | sed -n 's/^Setup code: \([A-Z0-9-]*\).*/\1/p'); [ -n "$c" ] && break
+    echo "$o" | grep -q "already has an admin" && break; sleep 1; done
+  ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  [ -n "$ip" ] || ip=$(ip -4 -o addr show scope global | awk '{sub(/\/.*/, "", $4); print $4; exit}')
+  dl=$(python3 -c "import sqlite3; r=sqlite3.connect('$T/data/kwickboot.db').execute(\"SELECT value FROM settings WHERE key='default_login_active'\").fetchone(); print(r[0] if r else '')" 2>/dev/null)
+  if [ -n "$c" ]; then step2="  2. Create the first admin there with this setup code:     $c"
+  elif [ -n "$dl" ]; then step2="  2. Sign in with  admin / admin  - you choose your own password right after."
+  else step2="  2. Sign in with your KwickBoot admin account."; fi
+  issue "  The KwickBoot server is running.
+
+  1. On any PC on this network, open the web console:   https://$ip:9443/ui/
+     (the browser warns once about the server's own certificate: choose Advanced -> Continue)
+$step2
+  3. Start PCs on this network from the network (boot menu key, often F12): they appear
+     in the console, where you approve them and choose what to install, restore or wipe.
+
+  ISO files: copy them into the iso folder on the stick's KWICKDATA drive (from any PC);
+  they show up in the console's library. $WHERE."
+  echo "LIVE READY $ip code=${c:+yes}"
+else issue "  KwickBoot could not start - details: $L (Alt+F2 does not work here: restart the stick
+  and choose \"Rescue shell\" to read it)."; exit 1; fi
+LIVE
+chmod 700 $R/usr/local/sbin/kwickboot-live
+cat > $R/etc/systemd/system/kwickboot-live.service <<'UNIT'
+[Unit]
+Description=KwickBoot live: state on the stick, install KwickBoot into RAM and start it
+After=local-fs.target systemd-networkd.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kwickboot-live
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+ln -sf /etc/systemd/system/kwickboot-live.service $R/etc/systemd/system/multi-user.target.wants/kwickboot-live.service
+printf '\nKwickBoot live (running from the stick - nothing is installed) - starting...\n\n' >> $R/etc/issue
+echo "Starting the KwickBoot server..."
+exit 0

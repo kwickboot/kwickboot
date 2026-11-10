@@ -1,0 +1,189 @@
+#!/bin/sh
+# KwickBoot installer (runs from the ISO's RAM OS, on the screen). Installs the KwickBoot server - Debian 13 + KwickBoot -
+# fully offline with the same install engine the product uses for every PC (served from the ISO on 127.0.0.1).
+# SPDX-License-Identifier: AGPL-3.0-or-later
+SRV=http://127.0.0.1:8080
+TK=/root/tk; mkdir -p $TK
+VER=$(cat /iso/.disk/kwickboot 2>/dev/null)
+line() { echo "------------------------------------------------------------------------------"; }
+ask() { printf '%s' "$1"; if [ -n "$AUTO" ]; then auto_answer "$1"; echo "$REPLY"
+  elif [ -n "$STICK" ] && stick_answer "$1"; then echo "$REPLY  (kwickboot.cfg)"; else read -r REPLY; fi; }
+# answers from the USB stick's kwickboot.cfg (KwickBoot USB Creator); a missing key is asked on the screen as usual
+STICK=""; [ -s /run/kb-stick.conf ] && STICK=1
+cfg() { sed -n "s/^$1=//p" /run/kb-stick.conf 2>/dev/null | head -n1; }
+stick_answer() { REPLY=""; case "$1" in
+  *"disk serial"*) [ -n "$DISK_AUTO" ] && REPLY=$SER ;; *"Server name"*) REPLY=$(cfg host) ;; *"Time zone"*) REPLY=$(cfg timezone) ;;
+  *"Choose"*) case "$(cfg network)" in static) REPLY=2 ;; dhcp) REPLY=1 ;; esac ;;
+  *"Address with prefix"*) REPLY=$(cfg address) ;; *"Gateway"*) REPLY=$(cfg gateway) ;; *"DNS servers"*) REPLY=$(cfg dns | tr ',' ' ') ;;
+  *"test lab"*) case "$(cfg test_lab)" in yes) REPLY=y ;; no) REPLY=n ;; esac ;;
+  *"INSTALL"*) [ -n "$DISK_AUTO" ] && REPLY=INSTALL ;;
+esac; [ -n "$REPLY" ]; }
+# a disk that already holds a KwickBoot server is never erased without a keyboard (a stick left in the PC must not reinstall it)
+has_kb_server() { for p in $(lsblk -lnpo NAME,TYPE "$1" | awk '$2=="part"{print $1}'); do
+  mkdir -p /tmp/kbprobe; mount -o ro "$p" /tmp/kbprobe 2>/dev/null || continue
+  f=""; [ -d /tmp/kbprobe/opt/pxe-toolkit ] || [ -d /tmp/kbprobe/opt/kwickboot-setup ] && f=1; umount /tmp/kbprobe
+  [ -n "$f" ] && return 0; done; return 1; }
+# unattended (kernel command line, e.g. the VM lab build): kb_auto=1 kb_confirm=<disk serial> [kb_host=] [kb_tz=] [kb_lab=1]
+# The disk is still chosen by its serial - an unattended install never guesses which disk to erase.
+AUTO=""; A_CONFIRM=""; A_HOST=kwickboot; A_TZ=UTC; LAB=""; LABNIC=""
+for w in $(cat /proc/cmdline); do case "$w" in
+  kb_auto=1) AUTO=1 ;; kb_confirm=*) A_CONFIRM=${w#kb_confirm=} ;; kb_host=*) A_HOST=${w#kb_host=} ;; kb_tz=*) A_TZ=${w#kb_tz=} ;;
+esac; done
+auto_answer() { case "$1" in
+  *"which disk"*) REPLY=""; while read -r n d; do [ "$(serial_of "$d")" = "$A_CONFIRM" ] && REPLY=$n; done < /tmp/kb-disks ;;
+  *"disk serial"*) REPLY=$A_CONFIRM ;; *"Server name"*) REPLY=$A_HOST ;; *"Time zone"*) REPLY=$A_TZ ;;
+  *"Choose"*) REPLY=1 ;; *"INSTALL"*) REPLY=INSTALL ;; *"test lab"*) REPLY=n ;; *) REPLY="" ;;
+esac; }
+clear 2>/dev/null
+line; echo " KwickBoot $VER - server installer"; line
+echo
+echo " This installs the KwickBoot boot server (Debian 13 + KwickBoot) onto one disk of this PC."
+echo " The disk you choose is ERASED completely. Nothing is written until you confirm twice."
+echo
+echo " KwickBoot installs, restores and wipes disks. You are solely responsible for your data and its"
+echo " backups. KwickBoot is free software (GNU AGPL-3.0) and comes with NO WARRANTY."
+echo " Terms: https://kwickboot.com/terms/"
+echo
+[ -d /sys/firmware/efi ] || { echo " This PC started the ISO in legacy BIOS mode. The KwickBoot server needs UEFI:"; echo " switch the firmware to UEFI (CSM off) and start the ISO again."; ask " Press Enter."; exit 1; }
+
+# ---- 1. disk: internal disks only, never the stick this ISO runs from
+isodev=$(cat /run/kb-iso-dev 2>/dev/null); isodisk=$(lsblk -no PKNAME "$isodev" 2>/dev/null | head -n1)
+[ -z "$isodisk" ] && isodisk=$(basename "$isodev")
+serial_of() { n=$(basename "$1"); s=$(lsblk -dno SERIAL "$1" 2>/dev/null | tr -d ' ')
+  for f in /sys/block/$n/serial /sys/block/$n/device/serial; do [ -z "$s" ] && [ -r "$f" ] && s=$(tr -d ' \n' < "$f"); done
+  [ -z "$s" ] && [ -r /sys/block/$n/device/vpd_pg80 ] && s=$(tail -c +5 /sys/block/$n/device/vpd_pg80 | tr -d ' \n\000')
+  [ -n "$s" ] || s="size-$(lsblk -dno SIZE "$1" | tr -d ' ')"; echo "$s"; }
+i=0; : > /tmp/kb-disks
+for d in $(lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}'); do
+  n=$(basename "$d"); [ "$n" = "$isodisk" ] && continue
+  case "$n" in loop*|ram*|zram*|sr*) continue ;; esac
+  i=$((i + 1)); echo "$i $d" >> /tmp/kb-disks
+  printf ' %d) %-12s %8s  %-28s serial %s%s\n' "$i" "$d" "$(lsblk -dno SIZE "$d" | tr -d ' ')" "$(lsblk -dno MODEL "$d" | cut -c1-28)" \
+    "$(serial_of "$d")" "$( [ "$(lsblk -dno TRAN "$d")" = usb ] && echo '  (USB)')"
+done
+[ "$i" -gt 0 ] || { echo " No disk found to install on."; ask " Press Enter."; exit 1; }
+echo
+DISK_AUTO=""; pick=""
+if [ -n "$STICK" ]; then
+  dsel=$(cfg disk)
+  case "$dsel" in
+    ""|ask) ;;
+    only-internal)
+      cand=$(while read -r n d; do [ "$(lsblk -dno TRAN "$d")" = usb ] || echo "$n"; done < /tmp/kb-disks)
+      if [ "$(echo "$cand" | grep -c .)" = 1 ]; then pick=$cand
+      else echo " kwickboot.cfg says disk=only-internal, but this PC has $(echo "$cand" | grep -c .) internal disks - choose below."; fi ;;
+    *) pick=$(while read -r n d; do [ "$(serial_of "$d")" = "$dsel" ] && echo "$n"; done < /tmp/kb-disks)
+       [ -n "$pick" ] || echo " kwickboot.cfg names disk serial $dsel - not in this PC. Choose below." ;;
+  esac
+  if [ -n "$pick" ]; then
+    pd=$(awk -v n="$pick" '$1==n{print $2}' /tmp/kb-disks)
+    if has_kb_server "$pd"; then
+      echo " $pd already holds a KwickBoot server - it is not erased automatically. Choose below (or remove the stick)."; pick=""
+    else
+      echo " kwickboot.cfg selects disk $pick: $pd ($(lsblk -dno SIZE "$pd" | tr -d ' '), serial $(serial_of "$pd"))."
+      echo " It will be ERASED and the server installed in 30 seconds. Press Enter to stop and answer by hand."
+      # BusyBox ash's read has no -t.  timeout preserves the same safety pause and
+      # still lets Enter cancel unattended installation on the local console.
+      if timeout 30 sh -c 'read -r x'; then pick=""; STICK=""; echo " Stopped - answer the questions below."; else DISK_AUTO=1; REPLY=$pick; fi
+    fi
+  fi
+fi
+[ -n "$DISK_AUTO" ] || ask " Install on which disk? (number) "
+DISK=$(awk -v n="$REPLY" '$1==n{print $2}' /tmp/kb-disks)
+[ -n "$DISK" ] || { echo " No such disk."; exit 1; }
+SER=$(serial_of "$DISK")
+echo " $DISK: $(lsblk -dno SIZE,MODEL "$DISK") - serial $SER"
+lsblk -no NAME,SIZE,FSTYPE,LABEL "$DISK" | sed 's/^/    /'
+ask " Type the disk serial ($SER) to confirm that THIS disk will be ERASED: "
+[ "$REPLY" = "$SER" ] || { echo " Not confirmed - nothing was changed."; exit 1; }
+
+# ---- 2. name, time zone, network
+ask " Server name [kwickboot]: "; HN=$(echo "${REPLY:-kwickboot}" | tr 'A-Z' 'a-z')
+echo "$HN" | grep -qE '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' || { echo " Name: letters, digits, '-'."; exit 1; }
+ask " Time zone [America/Chicago] (e.g. Europe/London, Asia/Shanghai): "; TZN=${REPLY:-America/Chicago}
+[ -f "/iso/http/zoneinfo.list" ] && ! grep -qx "$TZN" /iso/http/zoneinfo.list && { echo " Unknown time zone $TZN."; exit 1; }
+nic=""; dhcp=""; nodhcp=""
+for n in $(ls /sys/class/net | grep -v '^lo$'); do
+  [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] || continue
+  if udhcpc -i "$n" -q -n -t 4 -T 2 -s /bin/true >/tmp/kb-dhcp 2>&1 && l=$(sed -n 's/.*lease of \([0-9.]*\) obtained.*/\1/p' /tmp/kb-dhcp | tail -n1) && [ -n "$l" ]; then
+    [ -z "$dhcp" ] && { nic=$n; dhcp=$l; }
+  else nodhcp="$nodhcp $n"; [ -z "$nic" ] && nic=$n; fi
+done
+nodhcp=$(echo $nodhcp)
+echo
+echo " Network: ${nic:-no cable connected}${dhcp:+ - DHCP offers $dhcp}"
+echo "   1) DHCP (recommended: give the server a fixed reservation on your DHCP server)"
+echo "   2) static address"
+ask " Choose [1]: "
+KB_IP=""; KB_GW=""; KB_DNS=""; LAN=""
+if [ "$REPLY" = 2 ]; then
+  ask "   Address with prefix (e.g. 192.168.1.10/24): "; KB_IP=$REPLY
+  echo "$KB_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' || { echo " Not an address/prefix."; exit 1; }
+  ask "   Gateway: "; KB_GW=$REPLY
+  ask "   DNS servers (space-separated) [$KB_GW]: "; KB_DNS=${REPLY:-$KB_GW}
+  LAN=$(echo "$KB_IP" | awk -F'[./]' '{p=$5; if(p>=24) printf "%s.%s.%s.0/%s", $1,$2,$3,p; else if(p>=16) printf "%s.%s.0.0/%s", $1,$2,p; else printf "%s.0.0.0/%s", $1,p}')
+elif [ -n "$dhcp" ]; then
+  LAN=$(echo "$dhcp" | awk -F. '{printf "%s.%s.%s.0/24", $1,$2,$3}')
+fi
+LAN=${LAN:-192.168.0.0/24}
+# a second card with a link but no DHCP (host-only / private VM network): offer an isolated test lab on it.
+# Bridged VMs and normal servers (one card on the office LAN) never see this question.
+if [ -n "$dhcp" ] && [ -n "$nodhcp" ]; then
+  LABNIC=${nodhcp%% *}
+  echo; echo " $LABNIC has a link but no DHCP server (an isolated / host-only network?)."
+  ask " Use $LABNIC as an isolated test lab - KwickBoot hands out addresses (10.88.0.x) on $LABNIC only? [y/N] "
+  case "$REPLY" in y|Y|yes) LAB=1 ;; *) LABNIC="" ;; esac
+fi
+
+# ---- 3. the first admin (console + Linux login with sudo). Unattended (or chosen by the stick): none - the console's
+# first-run setup code instead, shown on the server's screen (a password never goes on a USB stick)
+ADM=""
+if [ -z "$AUTO" ] && [ -z "$DISK_AUTO" ]; then
+ask " Admin user name [admin]: "; ADM=${REPLY:-admin}
+echo "$ADM" | grep -qE '^[a-z][a-z0-9_-]{1,30}$' || { echo " Name: lowercase letters, digits, - _."; exit 1; }
+stty -echo 2>/dev/null; ask " Admin password (min 10 characters): "; P1=$REPLY; echo; ask " Repeat: "; P2=$REPLY; echo; stty echo 2>/dev/null
+[ "$P1" = "$P2" ] && [ ${#P1} -ge 10 ] || { echo " Passwords differ or are shorter than 10 characters."; exit 1; }
+case "$P1" in *:*) echo " The password must not contain ':'."; exit 1 ;; esac
+umask 077; printf '%s\n' "$P1" > /run/kb-admin-pw; P1=""; P2=""
+fi
+
+# ISOs dropped on the stick (KWICKDATA/iso) go into the new server's library
+IMP=""; NISO=0
+if [ -d /kbdata/iso ] && [ "$(cfg import_isos)" != no ]; then
+  NISO=$(ls /kbdata/iso/*.iso 2>/dev/null | wc -l); [ "$NISO" -gt 0 ] && IMP=/kbdata/iso
+fi
+NIMG=$(ls /kbdata/images/*.tar.zst 2>/dev/null | wc -l)     # ready-made OS images on the stick (KWICKDATA/images)
+[ "$NIMG" -gt 0 ] && [ "$(cfg import_isos)" != no ] && IMP=${IMP:-/kbdata/iso}
+# ---- 4. last confirmation
+echo; line
+echo " Disk:     $DISK ($(lsblk -dno SIZE "$DISK" | tr -d ' '), serial $SER) - ERASED"
+echo " Server:   $HN   time zone $TZN"
+echo " Network:  ${KB_IP:-DHCP}${KB_GW:+ via $KB_GW}   LAN $LAN"
+if [ -z "$ADM" ]; then echo " Admin:    created in the web console with the setup code (sudo pxectl setup-code)"; else echo " Admin:    $ADM (web console + Linux login with sudo)"; fi
+[ -n "$LAB" ] && echo " Test lab: $LABNIC = 10.88.0.1/24, KwickBoot hands out addresses there only"
+[ "$NISO" -gt 0 ] && [ -n "$IMP" ] && echo " ISOs:     $NISO from the stick ($(du -sh /kbdata/iso | cut -f1)) copied into the server's library"
+[ "$NIMG" -gt 0 ] && [ "$(cfg import_isos)" != no ] && echo " Images:   $NIMG ready-made OS images from the stick copied into the server's library"
+line
+ask " Type INSTALL to start: "
+[ "$REPLY" = INSTALL ] || { rm -f /run/kb-admin-pw; echo " Cancelled - nothing was changed."; exit 1; }
+
+# ---- 5. the product's own install engine, from the ISO
+for f in install.sh preflight.sh debian13-configure.sh; do wget -q -O $TK/$f "$SRV/scripts/$f" || { echo " $f missing on the ISO"; exit 1; }; done
+: > $TK/authorized_keys
+t0=$(date +%s)
+KB_IMPORT="$IMP" KB_LAB="$LAB" KB_LABMAC="$( [ -n "$LABNIC" ] && cat /sys/class/net/$LABNIC/address)" KB_OFFLINE=1 BOOT_ORDER=os-first OS=kbserver DISK="$DISK" CONFIRM="$SER" HOSTNAME="$HN" TZ="$TZN" LAN="$LAN" FIN=none KB_ADMIN="$ADM" KB_PWFILE=/run/kb-admin-pw \
+  KB_IP="$KB_IP" KB_GW="$KB_GW" KB_DNS="$KB_DNS" sh $TK/install.sh 2>&1 | tee /tmp/kb-install.log   # stderr included (2>&1 above)
+rm -f /run/kb-admin-pw
+if grep -q '^INSTALL OK' /tmp/kb-install.log; then
+  echo; line
+  echo " Installed in $(( $(date +%s) - t0 )) s. Remove the USB stick / ISO now."
+  echo " On its first start the server sets itself up (about a minute), then shows its console address,"
+  echo " e.g. https://${KB_IP%/*}${KB_IP:+:9443/ui/}${ADM:+ - sign in as '$ADM'}."
+  if [ -n "$AUTO" ]; then echo " Unattended: powering off."; sync; poweroff -f; fi
+  if [ -n "$DISK_AUTO" ]; then echo " Powering off in 20 s: remove the USB stick, then switch the PC on."; line; sleep 20; sync; poweroff -f; fi
+  line; ask " Press Enter to restart."; sync; reboot -f
+else
+  echo; echo " The install did not finish - see the messages above (full log: /tmp/kb-install.log, Alt+F2 for a shell)."
+  [ -n "$AUTO" ] && { echo " Unattended: powering off (failed)."; sync; poweroff -f; }
+  exit 1
+fi

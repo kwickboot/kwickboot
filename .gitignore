@@ -1,0 +1,73 @@
+# Python caches and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Private maintainer notes and machine-specific automation
+.claude/
+CLAUDE.md
+SOURCE-RECOVERY.md
+
+# Runtime state and secrets
+config.json
+data/
+logs/
+machines/
+*.db
+*.db-*
+*.log
+*.key
+*.pem
+authorized_keys
+admin.json
+
+# Generated RAM operating systems and large image libraries
+http/images/
+http/kbcore/
+http/kbcore-*/
+http/seat/
+http/san/
+http/truenas/
+http/iso/
+
+# Generated boot and release artifacts
+*.iso
+*.img
+*.sqfs
+*.squashfs
+*.qcow2
+*.raw
+*.vhd
+*.vhdx
+*.wim
+*.tar
+*.tar.gz
+*.tar.zst
+*.zst
+*.zip
+*.sha256
+SHA256SUMS
+VERSION
+dist/
+build/
+release/
+
+# Generated boot-loader outputs (templates and build scripts remain tracked)
+tftp/ipxe/
+tftp/alpine/
+usb/no-pxe/
+
+# Windows BCD transaction journals (the two base BCD stores remain tracked)
+linux/windows/*.LOG
+linux/windows/*.LOG1
+linux/windows/*.LOG2
+linux/windows/*.TM.blf
+linux/windows/*.regtrans-ms
+
+# Editor and operating-system noise
+*~
+*.swp
+.DS_Store
+
