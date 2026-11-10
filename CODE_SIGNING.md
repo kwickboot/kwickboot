@@ -2,9 +2,9 @@
 
 ## Current status
 
-KwickBoot is preparing an application for free open-source code signing through SignPath Foundation. Until the
-application is approved and the signing workflow is active, Windows releases are unsigned. Verify current downloads
-with the published SHA-256 checksums and detached release signature.
+KwickBoot has submitted an application for free open-source code signing through SignPath Foundation and is awaiting
+review. Until the application is approved and the signing workflow is active, Windows releases are unsigned. Verify
+current downloads with the published SHA-256 checksums and detached release signature.
 
 ## Scope
 
