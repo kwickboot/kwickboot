@@ -1,0 +1,44 @@
+name: Build Windows USB Creator
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "usb/exe/**"
+      - "usb/kwickboot-usb.ps1"
+      - ".github/workflows/windows-usb-creator.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out public source
+        uses: actions/checkout@v4
+
+      - name: Build launcher
+        shell: powershell
+        run: ./usb/exe/build.ps1
+
+      - name: Record checksum and source commit
+        shell: powershell
+        run: |
+          $exe = Resolve-Path ./usb/exe/KwickBootUSB.exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  KwickBootUSB.exe" | Set-Content -Encoding ascii ./usb/exe/KwickBootUSB.exe.sha256
+          "source=$env:GITHUB_SHA" | Set-Content -Encoding ascii ./usb/exe/build-source.txt
+
+      - name: Upload unsigned build for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: KwickBootUSB-unsigned-${{ github.sha }}
+          path: |
+            usb/exe/KwickBootUSB.exe
+            usb/exe/KwickBootUSB.exe.sha256
+            usb/exe/build-source.txt
+          if-no-files-found: error
+          retention-days: 14
+

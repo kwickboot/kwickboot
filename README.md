@@ -136,6 +136,7 @@ log.
 - Installs, wipes, terminals and screen sessions are written to the audit log with the user's name.
 - KwickBoot never redistributes operating systems: it downloads the vendor's official release (or uses your own
   media), verifies the vendor's checksum, and installs it.
+- Windows signing status, scope and release controls are documented in [CODE_SIGNING.md](CODE_SIGNING.md).
 
 ## License
 
