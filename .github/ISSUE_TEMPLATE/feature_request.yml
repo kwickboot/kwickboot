@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a concrete KwickBoot improvement
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the operational problem rather than only the desired implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Current workflow and desired outcome
+    validations:
+      required: true
+  - type: dropdown
+    id: audience
+    attributes:
+      label: Primary environment
+      options: [School or computer lab, MSP or repair shop, homelab, enterprise IT, refurbisher, other]
+    validations:
+      required: true

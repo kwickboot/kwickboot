@@ -138,6 +138,15 @@ log.
   media), verifies the vendor's checksum, and installs it.
 - Windows signing status, scope and release controls are documented in [CODE_SIGNING.md](CODE_SIGNING.md).
 
+## Community and contributions
+
+- Ask setup and design questions in [GitHub Discussions](https://github.com/kwickboot/kwickboot/discussions).
+- Report reproducible defects with the issue templates and include the firmware, NIC and boot stage involved.
+- See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request.
+- Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+Hardware compatibility reports from school labs, MSPs, refurbishers and homelabs are especially valuable.
+
 ## License
 
 GNU Affero General Public License v3.0 or later. If you run a modified KwickBoot for others over a network, you

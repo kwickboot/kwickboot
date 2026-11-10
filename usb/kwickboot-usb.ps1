@@ -233,7 +233,15 @@ function Show-ModeChooser {   # explicit up-front choice so the user knows which
     $b = New-Object System.Windows.Forms.Button; $b.Text = "$text`r`n$desc"; $b.Location = New-Object System.Drawing.Point(24, $y); $b.Size = New-Object System.Drawing.Size(504, 78)
     $b.TextAlign = "MiddleLeft"; $b.FlatStyle = "Flat"; $b.BackColor = [System.Drawing.Color]::FromArgb(33, 41, 64); $b.ForeColor = $fg
     $b.Font = New-Object System.Drawing.Font("Segoe UI", 11); $b.FlatAppearance.BorderColor = $accent
-    $b.Add_Click({ $f.Tag = $tag; $f.Close() }.GetNewClosure()); $f.Controls.Add($b) }
+    # Keep the mode on the button and resolve its owning form when clicked.
+    # Capturing $f here is unsafe: PowerShell event handlers run later and the
+    # captured variable can resolve to a different object, causing "$f.Tag"
+    # to fail even though Windows.Forms.Form itself supports Tag.
+    $b.Tag = $tag
+    $b.Add_Click({
+      $owner = $this.FindForm()
+      if ($owner) { $owner.Tag = [string]$this.Tag; $owner.Close() }
+    }); $f.Controls.Add($b) }
   & $mkbtn "KwickBoot server / installer stick" "Full bootable USB to install or run KwickBoot (needs the ISO, 8 GB+ stick)." 62 "server"
   & $mkbtn "No-PXE boot stick (tiny)" "For PCs that can't PXE-boot - finds this LAN's KwickBoot server by broadcast. ~2 MB." 154 "nopxe"
   [void]$f.ShowDialog()
@@ -281,6 +289,8 @@ function Show-CreatorGui {
   $log.Font = New-Object System.Drawing.Font("Consolas", 9); $log.Visible = $false; $form.Controls.Add($log)
   $create = & $mk Button 432 492 130 32; $create.Text = "Create USB"; $create.BackColor = $accent; $create.ForeColor = [System.Drawing.Color]::White; $create.FlatStyle = "Flat"; $form.Controls.Add($create)
   $close = & $mk Button 568 492 76 32; $close.Text = "Close"; $form.Controls.Add($close)
+  $form.AcceptButton = $create
+  $form.CancelButton = $close
 
   $populate = {
     $grid.Rows.Clear()

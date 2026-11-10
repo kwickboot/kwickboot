@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible KwickBoot defect
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include passwords, private hostnames or device serial numbers.
+  - type: input
+    id: version
+    attributes:
+      label: KwickBoot version
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [PXE boot, USB Creator, discovery, deployment, imaging, web console, documentation, other]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Firmware mode, Secure Boot state, NIC, server OS and relevant virtualization platform.
+    validations:
+      required: true

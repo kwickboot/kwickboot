@@ -53,6 +53,7 @@ VERSION
 dist/
 build/
 release/
+usb/exe/*-fixed.exe
 
 # Generated boot-loader outputs (templates and build scripts remain tracked)
 tftp/ipxe/
