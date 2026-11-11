@@ -64,6 +64,11 @@ def cmd_discover(a):
         db.audit(WHO, "discovery", "closed")
         print("discovery closed")
         return
+    if a[0] == "always":
+        db.set_setting("discovery_until", "always")
+        db.audit(WHO, "discovery", "set to ALWAYS open")
+        print("discovery ALWAYS OPEN: every machine that network-boots gets the RAM OS, is registered and waits for approval")
+        return
     mins = max(1, min(int(a[0]), 240))
     db.set_setting("discovery_until", time.time() + mins * 60)
     db.audit(WHO, "discovery", f"opened for {mins} min")
@@ -71,7 +76,10 @@ def cmd_discover(a):
 
 
 def cmd_discovery_status(a):
-    u = float(db.get_setting("discovery_until", "0") or 0)
+    v = db.get_setting("discovery_until", "0") or "0"
+    if v == "always":
+        print("  discovery: ALWAYS OPEN"); return
+    u = float(v)
     print(f"  discovery: OPEN until {time.strftime('%H:%M:%S', time.localtime(u))}" if u > time.time() else "  discovery: closed")
 
 

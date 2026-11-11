@@ -1,7 +1,7 @@
 #!/bin/sh
 # pxectl - control KwickBoot on Linux (state lives in /opt/pxe-toolkit/data/kwickboot.db)
 #   pxectl start|stop|restart|status|log
-#   pxectl discover <minutes>|off      open/close the discovery window (unknown machines boot the RAM OS)
+#   pxectl discover <minutes>|always|off   open/close discovery (unknown machines boot the RAM OS and wait)
 #   pxectl machines                    all machine records (approved, default, next, agent, preflight)
 #   pxectl approve <mac> <name> | deny <mac>
 #   pxectl default <mac> alpine|local|menu|seat   seat = diskless gaming seat (Steam Big Picture)

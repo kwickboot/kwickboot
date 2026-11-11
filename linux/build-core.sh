@@ -17,6 +17,10 @@ case "$ARCH" in
   *) echo "unsupported KB_ARCH=$ARCH" >&2; exit 2 ;;
 esac
 SUITE=${KB_SUITE:-$SUITE}
+# Kernel: "backports" (default) = Debian's newest SIGNED kernel + NIC firmware from <suite>-backports, so brand-new NICs
+# (Realtek RTL8127, Motorcomm YT6801, Intel E610, ...) work on day one and Secure Boot stays intact (linux-signed-*).
+# "stable" = the suite's own kernel (fallback). sid has no backports. The build uses the NEWEST kernel in the chroot.
+KERNEL=${KB_KERNEL:-backports}; [ "$SUITE" = sid ] && KERNEL=stable
 T=${KB_HOME:-/opt/pxe-toolkit}; OUT=$T/http/$([ "$ARCH" = amd64 ] && echo kbcore || echo kbcore-$ARCH)
 B=${KB_BUILD:-/var/tmp/kbcore-build-$ARCH}; R=$B/root           # KB_HOME/KB_BUILD: build anywhere; per-arch build dir + output
 MIRROR=http://deb.debian.org/debian
@@ -33,11 +37,12 @@ if [ $FRESH = 1 ]; then
   echo ">>> build chroot (Debian 13, packages via cache: ${PROXY:-none})"
   env ${PROXY:+http_proxy=$PROXY} debootstrap --arch=$ARCH --variant=minbase $SUITE $C $MIRROR > $B/debootstrap.log
 fi
-mount --bind /dev $C/dev; mkdir -p $C/dev/pts; mount -t devpts devpts $C/dev/pts 2>/dev/null || mount --bind /dev/pts $C/dev/pts
+# rslave: chroot mounts/unmounts never propagate to the build host's /dev (it may run other services/VMs)
+mount --bind /dev $C/dev; mount --make-rslave $C/dev; mkdir -p $C/dev/pts; mount -t devpts devpts $C/dev/pts 2>/dev/null || mount --bind /dev/pts $C/dev/pts
 mount -t proc proc $C/proc; mount -t sysfs sys $C/sys
 trap 'umount -l $C/dev/pts $C/dev $C/proc $C/sys 2>/dev/null || true' EXIT
 cp /etc/resolv.conf $C/etc/resolv.conf
-chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive KBP="$PROXY" KBARCH="$ARCH" KBSUITE="$SUITE" KBKPKG="$KPKG" /bin/bash -s <<'CHROOT'
+chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive KBP="$PROXY" KBARCH="$ARCH" KBSUITE="$SUITE" KBKPKG="$KPKG" KBKERNEL="$KERNEL" /bin/bash -s <<'CHROOT'
 set -e
 [ -n "$KBP" ] && echo "Acquire::http::Proxy \"$KBP\";" > /etc/apt/apt.conf.d/01cache
 if [ "$KBSUITE" = sid ]; then   # sid (unstable) is rolling - it has NO -updates / -security suites
@@ -55,6 +60,15 @@ apt-get install -y -q --no-install-recommends $KBKPKG busybox-static dropbear-bi
   debootstrap gpgv gnupg wget dosfstools e2fsprogs xfsprogs btrfs-progs exfatprogs ntfs-3g parted cryptsetup mdadm lvm2 \
   smartmontools nvme-cli hdparm lshw usbutils lm-sensors ipmitool memtester stress-ng ethtool \
   partclone udpcast pv wimtools chntpw sg3-utils gddrescue testdisk cifs-utils $EXTRA >/dev/null
+if [ "$KBKERNEL" = backports ]; then   # newest signed kernel + NIC firmware (packages not in backports fall back to stable)
+  printf 'deb http://deb.debian.org/debian %s-backports main non-free-firmware\n' "$KBSUITE" > /etc/apt/sources.list.d/backports.list
+  apt-get update -q >/dev/null
+  BFW="firmware-realtek firmware-misc-nonfree firmware-bnx2 firmware-bnx2x firmware-qlogic"
+  [ "$KBSUITE" = trixie ] && BFW="$BFW firmware-intel-misc"
+  apt-get install -y -q --no-install-recommends -t "$KBSUITE-backports" $KBKPKG $BFW >/dev/null
+else
+  rm -f /etc/apt/sources.list.d/backports.list
+fi
 # RICH-tier browser, only to BUILD the on-demand 'desktop' pack (these go into the chroot, not the Core itself).
 # Exactly what kbweb + WebKit + the software-EGL stack need (no cog/cage/seatd/dbus) + multi-script fonts + the toolchain.
 # arm64 (lean Core v1) skips the RICH tier entirely - those seats fall back to the kbgui/text tiers.
@@ -164,7 +178,9 @@ PY
 pick() {   # pick <list-file> <dirs...> : module paths under the given kernel dirs
   local out=$1; shift; : > $out
   for d in "$@"; do p=kernel/$d; [ -e "$C/lib/modules/$KV/$p" ] && (cd $C/lib/modules/$KV && find $p -name '*.ko*') >> $out || true; done
-  grep -vE 'ethernet/(mellanox|netronome|chelsio|sfc|qlogic|cavium|huawei|pensando|fungible|google|microsoft|amazon|emulex|brocade|cisco|ibm|mscc|wangxun|mucse|meta)/' $out > $out.f || true
+  # Datacenter/SAN NICs (mellanox, qlogic, chelsio, sfc + pensando = AMD, emulex, cisco, cavium, huawei, wangxun, mucse) are IN: iSCSI/SAN
+  # servers must reach the network from the Core. Still out: netronome (~100 MB firmware) + cloud-only/rare vNICs.
+  grep -vE 'ethernet/(netronome|fungible|google|microsoft|amazon|brocade|ibm|mscc|meta)/' $out > $out.f || true
   mv $out.f $out
 }
 pickmod() {   # pickmod <list-file> <module-basenames...> : append each module found by NAME anywhere in the tree.
@@ -208,6 +224,16 @@ install_mods $B/modules.all $R
 cp $C/lib/modules/$KV/modules.{order,builtin,builtin.modinfo} $R/lib/modules/$KV/ 2>/dev/null || true
 depmod -b $R $KV
 install_fw $B/modules.all $R
+# NIC coverage gate: every chip in linux/nic-must-have.txt must be drivable by THIS Core, or the build fails
+# (KB_NICGATE=warn to only report, e.g. for a KB_KERNEL=stable fallback build). amd64 list only, for now.
+if [ "$ARCH" = amd64 ] && [ -f $T/linux/nic-must-have.txt ]; then
+  if python3 $T/linux/nicgate.py $R/lib/modules/$KV $T/linux/nic-must-have.txt > $B/nicgate.txt; then
+    echo ">>> $(head -n1 $B/nicgate.txt) (kernel $KV)"
+  else
+    cat $B/nicgate.txt
+    [ "${KB_NICGATE:-$([ "$KERNEL" = stable ] && echo warn || echo fail)}" = warn ] || { echo "BUILD FAILED: NIC coverage gate (kernel $KV)"; exit 1; }
+  fi
+fi
 
 echo ">>> hw pack: storage, USB storage, input, filesystems + hardware-scan tools (loaded right after the network)"
 H=$B/pack-hw; rm -rf $H; mkdir -p $H/lib/modules/$KV $H/usr/share/misc
@@ -305,6 +331,47 @@ case "$1" in
                : > /etc/resolv.conf; for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf; done ;;
 esac
 EOF
+cat > $R/bin/kb-net <<'EOF'
+#!/bin/sh
+# kb-net: keep trying until this PC is on the network, then fetch the SSH keys + the agent. Never gives up (backoff to
+# 30 s), and writes WHY it is offline to /run/kb-netdiag (one line per cause) for the GUI and the text console:
+# no link (cable/switch), link but no DHCP reply, an Ethernet card with no driver in this Core, or the server not answering.
+S=$(cat /etc/kb-server 2>/dev/null); D=/run/kb-netdiag; w=3
+nics() { for i in $(ls /sys/class/net); do [ -e /sys/class/net/$i/device ] && echo $i; done; }   # physical cards only
+myip() { ip -4 -o addr show 2>/dev/null | awk '$2!="lo"{sub("/.*","",$4); print $4; exit}'; }
+backoff() { sleep $w; w=$((w * 2)); [ $w -gt 30 ] && w=30; }
+diag() {
+  : > $D.tmp
+  for i in $(nics); do
+    if [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" = 1 ]; then echo "$i: cable connected, but no DHCP reply - retrying" >> $D.tmp
+    else echo "$i: no link - check the cable / switch port" >> $D.tmp; fi
+  done
+  for p in /sys/bus/pci/devices/*; do   # PCI class 0x0200 = Ethernet controller; no driver bound = this Core cannot use it
+    case "$(cat $p/class 2>/dev/null)" in 0x0200*) ;; *) continue ;; esac
+    [ -e $p/driver ] && continue
+    v=$(cat $p/vendor); d=$(cat $p/device)
+    echo "Ethernet card ${v#0x}:${d#0x} has NO DRIVER in this RAM OS - report this ID to IT" >> $D.tmp
+  done
+  [ -s $D.tmp ] || echo "no wired network card found" >> $D.tmp
+  mv -f $D.tmp $D
+}
+while [ -z "$(myip)" ]; do
+  for i in $(nics); do ip link set "$i" up 2>/dev/null; done
+  for i in $(nics); do
+    [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" = 1 ] || continue
+    udhcpc -i "$i" -s /etc/udhcpc.script -q -n -t 3 -T 2 -x hostname:kwickboot >/dev/null 2>&1 && break
+  done
+  [ -n "$(myip)" ] && break
+  diag; backoff
+done
+w=2
+until wget -q -T 10 -O /tmp/agent.sh "http://$S/scripts/agent.sh"; do
+  echo "network up ($(myip)) but the KwickBoot server $S does not answer - retrying" > $D; backoff
+done
+rm -f $D
+wget -q -T 10 -O /root/.ssh/authorized_keys "http://$S/authorized_keys" 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null
+exec sh /tmp/agent.sh > /var/log/pxe-agent.log 2>&1
+EOF
 cat > $R/init <<'EOF'
 #!/bin/sh
 # KwickBoot Core init: drivers -> wired network -> SSH -> agent. Everything runs from RAM; disks are never mounted.
@@ -335,8 +402,12 @@ splash 30 "Loading drivers"
 # timeout). The NIC we booted from already has carrier, so usually there is nothing to wait for; wait once,
 # briefly, only if no link is up yet (a slow PHY settling) instead of a flat delay.
 for i in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$i" up; done
-up=; for i in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" = 1 ] && up=1; done
-[ -n "$up" ] || sleep 1
+# Real PHYs (e.g. Realtek RTL8168/8111 on mini PCs) need ~2-4 s after "link up" to report carrier; a flat 1 s wait
+# skipped DHCP on them entirely. Poll up to 8 s, leaving as soon as any card has a link.
+for t in 1 2 3 4 5 6 7 8; do
+  up=; for i in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" = 1 ] && up=1; done
+  [ -n "$up" ] && break; sleep 1
+done
 for i in $(ls /sys/class/net | grep -v '^lo$'); do
   [ "$(cat /sys/class/net/$i/carrier 2>/dev/null)" = 1 ] || continue   # no link -> skip DHCP on this card
   udhcpc -i "$i" -s /etc/udhcpc.script -q -n -t 8 -T 2 -x hostname:kwickboot >/dev/null 2>&1 && break
@@ -376,13 +447,13 @@ else
 fi
 # (setsid -c: tty2 becomes the shell's controlling terminal - job control, Ctrl+C; respawned when the shell exits)
 grep -qw kb_shell=1 /proc/cmdline && ( while :; do setsid -c /bin/sh -l <> /dev/tty2 >&0 2>&1; sleep 1; done ) &
-# agent (fetched from the server, so it is always current)
-( for i in 1 2 3 4 5 6 7 8 9 10; do wget -q -T 10 -O /tmp/agent.sh "http://$S/scripts/agent.sh" && break; sleep 2; done
-  exec sh /tmp/agent.sh > /var/log/pxe-agent.log 2>&1 ) &
+# network watchdog + agent (fetched from the server, so it is always current). kb-net retries forever and shows why
+# it is offline on screen, so a slow link / late cable / missing driver never leaves the Core sitting silently.
+/bin/kb-net > /dev/null 2>&1 &
 # PID 1 must never exit
 while true; do sleep 3600; done
 EOF
-chmod 755 $R/init $R/bin/curl $R/bin/kb-console $R/bin/kb-facts $R/bin/kb-gui-agent $R/bin/kb-desktop $R/bin/kbpty $R/etc/udhcpc.script
+chmod 755 $R/init $R/bin/kb-net $R/bin/curl $R/bin/kb-console $R/bin/kb-facts $R/bin/kb-gui-agent $R/bin/kb-desktop $R/bin/kbpty $R/etc/udhcpc.script
 date +%Y%m%d-%H%M > $R/etc/kb-core-version; echo "$(cat $R/etc/kb-core-version)" > $R/etc/kwickboot-ramos-version
 touch $R/etc/resolv.conf
 

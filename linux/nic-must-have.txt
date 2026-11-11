@@ -1,0 +1,63 @@
+# KwickBoot Core NIC coverage gate - linux/build-core.sh FAILS the build if the Core cannot drive any chip listed here.
+# One PCI vendor:device per line + a label. Add every new NIC family the moment Linux supports it; this list IS the promise
+# "KwickBoot boots on any wired NIC, 1990s to today". Checked against the Core's own modules.alias (amd64 Cores only:
+# the lean arm64/i386 Cores use their own lists if/when added). A leading "~" marks a known gap we cannot fix ourselves
+# (reported every build, not fatal; the gate says when it becomes covered). "=module" = check by module name (built-ins).
+# --- legacy PCI (late 1990s - 2000s) ---
+10ec:8139  Realtek RTL8139 100M
+10b7:9200  3Com 3c905C
+8086:1229  Intel 82557/8/9 e100
+8086:100e  Intel 82540EM e1000 (also QEMU/VirtualBox default)
+1011:0019  DEC 21142/43 tulip
+1106:3065  VIA Rhine II
+10de:0373  NVIDIA nForce MCP55 forcedeth
+1022:2000  AMD PCnet32 (VMware legacy)
+# --- desktop / laptop / mini PC (2008 - today) ---
+10ec:8168  Realtek RTL8111/8168 1G
+10ec:8136  Realtek RTL8101/8102 100M
+10ec:8125  Realtek RTL8125 2.5G
+10ec:8126  Realtek RTL8126 5G
+10ec:8127  Realtek RTL8127 10G (2025)
+1f0a:6801  Motorcomm YT6801 1G (mini PCs 2024+)
+8086:15b8  Intel I219-V e1000e
+8086:550a  Intel I219-LM (Meteor Lake+)
+8086:15f3  Intel I225-V 2.5G
+8086:125b  Intel I226-V 2.5G
+8086:1533  Intel I210
+14e4:1677  Broadcom BCM5751 tg3
+14e4:165f  Broadcom BCM5720 tg3 (Dell/HPE LOM)
+1969:e091  Qualcomm Atheros Killer E2200 alx
+11ab:4380  Marvell 88E8057 sky2
+1d6a:07b1  Aquantia AQC107 10G
+1d6a:04c0  Aquantia/Marvell AQC113 10G
+# --- server / datacenter / SAN ---
+8086:1521  Intel I350
+8086:10fb  Intel 82599 10G ixgbe
+8086:1563  Intel X550 10G
+8086:1572  Intel X710 10G i40e
+8086:1593  Intel E810 25G ice
+8086:57b0  Intel E610 10G (2024)
+14e4:168e  Broadcom NetXtreme II 57810 bnx2x
+14e4:16d7  Broadcom BCM57414 25G bnxt
+14e4:1750  Broadcom BCM57508 100G bnxt
+14e4:1760  Broadcom BCM57608 400G bnxt (2024)
+15b3:1003  Mellanox ConnectX-3 mlx4
+15b3:1015  Mellanox ConnectX-4 Lx mlx5
+15b3:1017  Mellanox ConnectX-5 mlx5
+15b3:101d  Mellanox ConnectX-6 Dx mlx5
+15b3:1021  Mellanox ConnectX-7 mlx5
+1077:8070  QLogic/Marvell FastLinQ 41xxx qede
+1077:1656  QLogic/Marvell FastLinQ 45xxx qede
+1077:8020  QLogic NetXen/qlcnic 10G
+1924:0b03  Solarflare/AMD X2 sfc
+1dd8:1002  AMD Pensando ionic
+1022:1458  AMD EPYC built-in 10G amd-xgbe
+19a2:0710  Emulex OneConnect be2net
+1137:0043  Cisco UCS VIC enic
+1425:6408  Chelsio T6 cxgb4
+19e5:0200  Huawei hinic
+~8088:1001  WangXun txgbe 10G (known gap: Debian kernels do not build CONFIG_TXGBE/NGBE yet)
+# --- virtual (virtio-pci is built into Debian kernels and publishes no PCI aliases: checked by module name) ---
+1af4:1000  virtio-net (legacy)  =virtio_net
+1af4:1041  virtio-net (modern)  =virtio_net
+15ad:07b0  VMware vmxnet3

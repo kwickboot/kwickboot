@@ -1184,7 +1184,8 @@ def handle(h, method, _preauth=False):
                       "me": {"user": who, "role": role, "must_change_pw": bool(user.get("must_change_pw")),
                              "mfa_enabled": bool(user.get("mfa_enabled")), "mfa_enroll": bool(not user.get("federated") and not user.get("mfa_enabled") and mfa_required_for(user)),
                              "display": user.get("display") or "", "profile": db.profile(user["id"]) if user.get("id") else {}},
-                      "departments": mine, "discovery": disc, "discovery_until": int(float(until)) if disc and until else None,
+                      "departments": mine, "discovery": disc, "discovery_always": until == "always",
+                      "discovery_until": int(float(until)) if disc and until and until != "always" else None,
                       "machines": [summary(m) for m in db.machines(ids, unassigned)], "recipes": recipes(),
                       "log": rd(S.LOG, 6000).splitlines()[-25:] if role == "admin" else [],
                       "terms": {"version": TERMS_VERSION, "notice": TERMS_NOTICE, "url": TERMS_URL,
@@ -1688,6 +1689,10 @@ def do_action(user, a, ip):
     if RANK[role] < RANK[NEEDS[act]]:
         return 403, {"error": f"'{act}' needs role {NEEDS[act]} (you are {role})"}
     if act == "discover":
+        if a.get("minutes") == "always":
+            db.set_setting("discovery_until", "always")
+            audit(who, "discovery set to ALWAYS open", ip)
+            return 200, {"ok": True}
         mins = int(a.get("minutes", 0))
         if mins <= 0:
             db.set_setting("discovery_until", None)

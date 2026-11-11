@@ -86,6 +86,7 @@ while true; do
   esac
   row "${C_status:-Status}" "$sval"
   if [ -z "$ip" ]; then row "${C_server:-Server}" "${R}no network address yet$N"
+    [ -s /run/kb-netdiag ] && while read -r l; do row "" "${R}$l$N"; done < /run/kb-netdiag
   elif [ -n "$seen" ] && [ "$seen" -gt 90 ]; then row "${C_server:-Server}" "$SRV  ${R}no contact for ${seen}s$N"
   else row "${C_server:-Server}" "$SRV  ${D}${seen:+contact ${seen}s ago}$N"; fi
   echo
@@ -188,7 +189,7 @@ while :; do
     if [ "$sb" = 1 ]; then emit m_firmware "$fw|g"; else emit m_firmware "$fw"; fi
     emit m_tpm "$tpm"
     emit disks "$disk"
-    if [ -n "$ip" ]; then emit net_addr "$ip${spd:+  $spd}|g"; else emit net_addr "waiting for network..."; fi
+    if [ -n "$ip" ]; then emit net_addr "$ip${spd:+  $spd}|g"; else emit net_addr "$(sed -n 1p /run/kb-netdiag 2>/dev/null | grep . || echo 'waiting for network...')"; fi
     emit net_nic "${drv:-?}${mac:+  $mac}"
     if [ "$sb" = 1 ] && [ "$tpm" = "2.0" ]; then
       emit ai "Windows 11 ready - TPM 2.0 + Secure Boot detected|Windows 10 or any Linux also install cleanly|No disk problems found - safe to install"

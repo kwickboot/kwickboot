@@ -160,7 +160,10 @@ def set_meta(mac, **kw):
 
 def discovery_open():
     try:
-        return float(db.get_setting("discovery_until", "0")) > time.time()
+        v = db.get_setting("discovery_until", "0") or "0"
+        if v == "always":   # always-open: answer every PXE client; unknown ones get the RAM OS and wait for approval
+            return True
+        return float(v) > time.time()
     except ValueError:
         return False
 

@@ -715,11 +715,17 @@ function renderTop() {
   if (ov.discovery) {
     const left = Math.max(0, Math.round((ov.discovery_until * 1000 - Date.now()) / 60000));
     dp.append(el("button", {class: "pill warn", style: "border:0;cursor:pointer", title: "Unknown machines that network-boot now are registered",
-      onclick: () => can("manager") && setDiscovery(0)}, icon("radar"), `Discovery open · ${left} min`));
-  } else if (can("manager")) dp.append(el("button", {class: "btn sm", onclick: () => setDiscovery(30)}, icon("radar"), "Discover new machines"));
+      onclick: () => can("manager") && setDiscovery(0)}, icon("radar"), ov.discovery_always ? "Discovery open · always" : `Discovery open · ${left} min`));
+    if (!ov.discovery_always && can("manager")) dp.append(el("button", {class: "btn sm ghost", title: "Answer every machine that network-boots, permanently: unknown machines get the RAM OS and wait for approval (no disk is touched)",
+      onclick: () => setDiscovery("always")}, "Keep open"));
+  } else if (can("manager")) {
+    dp.append(el("button", {class: "btn sm", onclick: () => setDiscovery(30)}, icon("radar"), "Discover new machines"));
+    dp.append(el("button", {class: "btn sm ghost", title: "Answer every machine that network-boots, permanently: unknown machines get the RAM OS and wait for approval (no disk is touched)",
+      onclick: () => setDiscovery("always")}, "Always"));
+  }
 }
 async function setDiscovery(min) {
-  try { await api("/api/action", {action: "discover", minutes: min}); toast(min ? `Discovery open for ${min} min. Power on machines with network boot.` : "Discovery closed."); await refresh(); }
+  try { await api("/api/action", {action: "discover", minutes: min}); toast(min === "always" ? "Discovery always open: every machine that network-boots gets the RAM OS and waits for approval." : min ? `Discovery open for ${min} min. Power on machines with network boot.` : "Discovery closed."); await refresh(); }
   catch (e) { toast(e.message, "bad"); }
 }
 
