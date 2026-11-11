@@ -29,6 +29,9 @@ struct T { char n[24]; int x,y,w,h; } static_tiles[12]; static int nt=0;        
 static int tcur=-1;                                                                     // keyboard-focused dashboard tile (-1 = none / mouse only)
 struct F { char k[24]; char v[200]; } facts[64]; static int nf=0;
 static char fontname[64];
+static char uilang[8]="en";                  // kbgui's OWN UI language (which chrome-<lang>-WxH set is shown)
+static const char *SHARE_DIR=0, *FACTS_FILE=0;
+static int switch_lang(const char*lang);     // defined below (reloads chrome for a language); used by the overlay handler
 static unsigned char *fb; static long fblen; static int xres,yres,bpp,stride,ttyfd=-1;
 static unsigned char *fbframe; static int DX,DY,DW,DH;   // where/how the chrome lands on the real framebuffer
 static const unsigned char BG[4]={44,27,21,255};     // #151b2c  (BGRA, i.e. B,G,R,A)
@@ -49,7 +52,10 @@ static const char* LANGS[][3] = {
   {"Italiano","it_IT.UTF-8","it"},{"Portugues","pt_BR.UTF-8","br"},{"Polski","pl_PL.UTF-8","pl"},{"Nederlands","nl_NL.UTF-8","nl"},
   {"Turkce","tr_TR.UTF-8","tr"},{"Cesky","cs_CZ.UTF-8","cz"},{"Russian","ru_RU.UTF-8","ru"},{"Ukrainian","uk_UA.UTF-8","ua"},
   {"Arabic","ar_SA.UTF-8","ara"},{"Hebrew","he_IL.UTF-8","il"},{"Chinese","zh_CN.UTF-8","cn"},{"Japanese","ja_JP.UTF-8","jp"},
-  {"Korean","ko_KR.UTF-8","kr"},{"Thai","th_TH.UTF-8","th"},{"Vietnam","vi_VN.UTF-8","vn"},{"Hindi","hi_IN.UTF-8","in"} };
+  {"Korean","ko_KR.UTF-8","kr"},{"Thai","th_TH.UTF-8","th"},{"Vietnam","vi_VN.UTF-8","vn"},{"Hindi","hi_IN.UTF-8","in"},
+  {"Svenska","sv_SE.UTF-8","se"} };
+// The UI switches to the picked language's chrome when a chrome-<code>-WxH set exists (code = locale's first 2 letters);
+// if not (e.g. Hebrew, which has no translation), the install locale still applies and the UI stays in its current language.
 #define NLANGS ((int)(sizeof LANGS/sizeof LANGS[0]))
 // installable-OS catalog, fetched by kb-gui-agent into /run/kb-oslist ("id|name|min_gb" per line)
 static struct { char id[40]; char name[60]; int min_gb; } oslist[48]; static int nos=0, os_sel=0;
@@ -330,8 +336,11 @@ static int handle_overlay_act(int act){
   if(overlay==5){
     if(act>=0){ ov_sel=act; keepopen=1; }                                               // pick a language
     else if(act==-2){ FILE*a=fopen("/run/kb-gui-action","w"); if(a){ fprintf(a,"language:%s:%s\n",LANGS[ov_sel][1],LANGS[ov_sel][2]); fclose(a);}
+      char nl[8]; nl[0]=LANGS[ov_sel][1][0]; nl[1]=LANGS[ov_sel][1][1]; nl[2]=0;   // locale -> 2-letter UI code
+      int uiok=switch_lang(nl);                                                     // switch kbgui's own UI too
       overlay=8; snprintf(ovT,80,"Language set"); snprintf(ovB[0],100,"%s  -  keymap %s",LANGS[ov_sel][0],LANGS[ov_sel][2]); ovB[1][0]=0;
-      snprintf(ovB[2],100,"It will apply to the installed OS and your typing."); ovN=3; keepopen=1; }
+      snprintf(ovB[2],100, uiok?"Applied to this screen, your typing and the installed OS."
+                               :"Applied to your typing and the installed OS."); ovN=3; keepopen=1; }
   } else if(overlay==7){                                                                 // OS picker
     if(act>=0 && act<nos){ os_sel=act; keepopen=1; }                                      // pick an OS
     else if(act==-2 && nos>0){ load_disks(); disk_sel=0;                             // Install -> disk picker (2+ disks) or straight to confirm
@@ -434,34 +443,47 @@ static void restore_text(int sig){ (void)sig; if(ttyfd>=0) ioctl(ttyfd,KDSETMODE
 
 // choose the chrome rendered for this screen: the largest whose W<=xres and H<=yres (native, crisp); if none fits (screen
 // smaller than the smallest render) take the smallest and let it scale down. Returns the WxH tag, or empty on none.
-static void pick_chrome(const char*dir,char*tagout){ tagout[0]=0; DIR*dp=opendir(dir); struct dirent*de; int bestFit=-1,bestSmall=1<<30; char fitTag[32]={0},smallTag[32]={0};
-  while(dp&&(de=readdir(dp))){ int w,h; if(sscanf(de->d_name,"chrome-%dx%d.info",&w,&h)!=2)continue;
+static void pick_chrome(const char*dir,const char*lang,char*tagout){ tagout[0]=0; char pfx[24]; int pl=snprintf(pfx,sizeof pfx,"chrome-%s-",lang);
+  DIR*dp=opendir(dir); struct dirent*de; int bestFit=-1,bestSmall=1<<30; char fitTag[32]={0},smallTag[32]={0};
+  while(dp&&(de=readdir(dp))){ if(strncmp(de->d_name,pfx,pl))continue; int w,h; if(sscanf(de->d_name+pl,"%dx%d.info",&w,&h)!=2)continue;
     if(w<=xres && h<=yres){ if(w>bestFit){ bestFit=w; snprintf(fitTag,sizeof fitTag,"%dx%d",w,h);} }
     if(w<bestSmall){ bestSmall=w; snprintf(smallTag,sizeof smallTag,"%dx%d",w,h);} }
   if(dp)closedir(dp);
   if(fitTag[0]) strcpy(tagout,fitTag); else if(smallTag[0]) strcpy(tagout,smallTag); }
 
-static int load_set(const char*dir){ char tag[32]; pick_chrome(dir,tag); if(!tag[0])return 0;
-  char info[512],gz[512],fnt[512]; snprintf(info,sizeof info,"%s/chrome-%s.info",dir,tag); load_info(info);
-  if(!CW||!CH||!fontname[0])return 0;
-  chrome=malloc((long)CW*CH*4); frame=malloc((long)CW*CH*4); if(!chrome||!frame)return 0;
-  snprintf(gz,sizeof gz,"%s/chrome-%s.bgra.gz",dir,tag); load_chrome(gz);
+// load the chrome set for `lang` at this screen's resolution. On success swaps in the new chrome/frame; on failure (no such
+// language, e.g. Hebrew) leaves the current set untouched and returns 0.
+static int load_set(const char*dir,const char*lang){ char tag[32]; pick_chrome(dir,lang,tag); if(!tag[0])return 0;
+  char info[512],gz[512],fnt[512];
+  int sCW=CW,sCH=CH; char sfont[64]; strcpy(sfont,fontname);
+  snprintf(info,sizeof info,"%s/chrome-%s-%s.info",dir,lang,tag); load_info(info);
+  if(!CW||!CH||!fontname[0]){ CW=sCW;CH=sCH;strcpy(fontname,sfont); return 0; }
+  unsigned char*nc=malloc((long)CW*CH*4), *nf=malloc((long)CW*CH*4);
+  if(!nc||!nf){ free(nc); free(nf); CW=sCW;CH=sCH;strcpy(fontname,sfont); return 0; }
+  if(chrome)free(chrome); if(frame)free(frame); chrome=nc; frame=nf;
+  snprintf(gz,sizeof gz,"%s/chrome-%s-%s.bgra.gz",dir,lang,tag); load_chrome(gz);
   snprintf(fnt,sizeof fnt,"%s/%s",dir,fontname); load_font(fnt); if(!FW)return 0;
   return 1; }
+
+// switch kbgui's own UI language: reload chrome for `lang` and repaint the dashboard. Keeps the old UI on failure.
+static int switch_lang(const char*lang){ if(!load_set(SHARE_DIR,lang)) return 0;
+  strncpy(uilang,lang,7); uilang[7]=0; compute_fit(); load_facts(FACTS_FILE); compose(); blit_frame(); return 1; }
 
 int main(int argc,char**argv){
   if(argc<2){ fprintf(stderr,"usage: kbgui <share-dir> [facts]\n"); return 2; }
   const char*dir=argv[1]; const char*factsf=argc>2?argv[2]:0;
+  SHARE_DIR=dir; FACTS_FILE=factsf;
+  char*el=getenv("KBFB_LANG"); if(el&&*el){ strncpy(uilang,el,7); uilang[7]=0; }   // test/preview: pick the initial UI language
   char*dump=getenv("KBFB_DUMP");
   if(dump){ xres=1920;yres=1080; char*rs=getenv("KBFB_RES"); if(rs)sscanf(rs,"%dx%d",&xres,&yres); bpp=32;stride=xres*4; fblen=(long)stride*yres; fb=calloc(1,fblen);
-    if(!load_set(dir)){ fprintf(stderr,"no chrome set in %s\n",dir); return 2; }
+    if(!load_set(dir,uilang) && !load_set(dir,"en")){ fprintf(stderr,"no chrome set in %s\n",dir); return 2; }
     compute_fit(); fbframe=calloc(1,(long)xres*yres*4); load_facts(factsf); compose(); blit_frame(); cursor(xres/2-60,yres/2+140);
     FILE*o=fopen(dump,"wb"); if(o){ fprintf(o,"P6\n%d %d\n255\n",xres,yres); for(long i=0;i<(long)xres*yres;i++){unsigned char*p=fb+(i/xres)*stride+(i%xres)*(bpp/8); unsigned char rgb[3]={p[2],p[1],p[0]}; fwrite(rgb,1,3,o);} fclose(o);} return 0; }
   int fd=open("/dev/fb0",O_RDWR); if(fd<0)return 2; struct fb_var_screeninfo v; struct fb_fix_screeninfo f;
   if(ioctl(fd,FBIOGET_VSCREENINFO,&v)||ioctl(fd,FBIOGET_FSCREENINFO,&f)){close(fd);return 2;}
   xres=v.xres;yres=v.yres;bpp=v.bits_per_pixel;stride=f.line_length; if(bpp!=32&&bpp!=24){close(fd);return 2;}
   fblen=(long)stride*yres; fb=mmap(0,fblen,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); if(fb==MAP_FAILED){close(fd);return 2;}
-  if(!load_set(dir)){close(fd);return 2;}
+  if(!load_set(dir,uilang) && !load_set(dir,"en")){close(fd);return 2;}
   compute_fit(); fbframe=malloc((long)xres*yres*4); if(!fbframe){close(fd);return 2;}
   load_facts(factsf);
   ttyfd=open("/dev/tty1",O_RDWR); if(ttyfd>=0) ioctl(ttyfd,KDSETMODE,KD_GRAPHICS);

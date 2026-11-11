@@ -433,15 +433,18 @@ RAMKB=$(awk '/^MemTotal/{print $2}' /proc/meminfo 2>/dev/null)
 # RICH (kbweb browser) needs a framebuffer (/dev/fb0) + enough RAM. kbweb paints WebKit on the CPU and blits straight to
 # fb0 - NO GPU, NO DRM master, NO KMS/GL - so it runs wherever kbgui does (efifb, simpledrm, hyperv_drm, virtio-gpu, real
 # GPUs). Machines with the fb but too little RAM fall to kbgui; machines with no fb at all fall to the text console.
-if [ -e /dev/fb0 ] && [ "${RAMKB:-0}" -ge 3800000 ] && [ -x /bin/kb-desktop ]; then
+# RICH from ~1 GB (900000 kB: a "1 GB" PC reports ~0.9-0.97 GB usable after firmware/iGPU reservations).
+# Each tier runs WITHOUT exec so that when it exits (no chrome for this screen, no input, crash) the next tier really
+# starts - "exec A || exec B" never reaches B once A has started, which left tty1 black.
+if [ -e /dev/fb0 ] && [ "${RAMKB:-0}" -ge 900000 ] && [ -x /bin/kb-desktop ]; then
   /bin/kb-facts >/dev/null 2>&1 &
   /bin/kb-gui-agent >/dev/null 2>&1 &
   # NB: kb-desktop WITHOUT exec - it can exit (RICH unavailable on this GPU), and the shell must survive to run the || fallback.
-  setsid sh -c '/bin/kb-desktop <> /dev/tty1 >&0 2>&1 || exec /bin/kbgui /usr/share/kbgui /run/kb-facts <> /dev/tty1 >&0 2>&1 || exec /bin/kb-console <> /dev/tty1 >&0 2>&1' &
+  setsid sh -c '/bin/kb-desktop <> /dev/tty1 >&0 2>&1 || /bin/kbgui /usr/share/kbgui /run/kb-facts <> /dev/tty1 >&0 2>&1 || exec /bin/kb-console <> /dev/tty1 >&0 2>&1' &
 elif [ -e /dev/fb0 ] && [ -x /bin/kbgui ]; then
   /bin/kb-facts >/dev/null 2>&1 &
   /bin/kb-gui-agent >/dev/null 2>&1 &
-  setsid sh -c 'exec /bin/kbgui /usr/share/kbgui /run/kb-facts <> /dev/tty1 >&0 2>&1 || exec /bin/kb-console <> /dev/tty1 >&0 2>&1' &
+  setsid sh -c '/bin/kbgui /usr/share/kbgui /run/kb-facts <> /dev/tty1 >&0 2>&1 || exec /bin/kb-console <> /dev/tty1 >&0 2>&1' &
 else
   setsid sh -c 'exec /bin/kb-console <> /dev/tty1 >&0 2>&1' &
 fi
