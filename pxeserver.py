@@ -1731,7 +1731,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.flush()
         log(f"[capture] {mac} {name}/{fname}: {'FAIL ' + err if err else f'{n // 1000000} MB'}")
 
-    QUIET = ("/agent/watch?", "/agent/screen?", "/agent/log?", "/agent/hello?", "/agent/job?", "/ep/checkin")
+    QUIET = ("/agent/watch?", "/agent/screen?", "/agent/screenfb?", "/agent/log?", "/agent/hello?", "/agent/job?", "/ep/checkin")
 
     def log_message(self, fmt, *args):
         line = fmt % args
@@ -2382,6 +2382,24 @@ class Handler(SimpleHTTPRequestHandler):
                 raw = b""
             if len(raw) > 4 and len(raw) >= 4 + 2 * raw[0] * raw[1] and len(raw) <= 64_000:
                 live.publish({"t": "screen", "mac": mac, "data": _b64.b64encode(raw).decode()}, topic=f"screen:{mac}")
+            self.send_text("ok\n")
+        elif u.path == "/agent/screenfb":     # the RAM OS's GRAPHICAL screen (web desktop / kbgui): base64(gzip(raw fb0))
+            HEARD[mac] = time.time()
+            import base64 as _b64, binascii as _ba
+            try:
+                fw, fh, fs, fbpp = (int(q.get(k, ["0"])[0]) for k in ("w", "h", "s", "b"))
+            except ValueError:
+                fw = fh = fs = fbpp = 0
+            data = body.strip()
+            ok = 0 < fw <= 7680 and 0 < fh <= 4320 and fbpp in (24, 32) and fs >= fw * fbpp // 8 and 16 < len(data) <= 4_000_000
+            if ok:
+                try:                          # relayed as-is (the browser gunzips it); only check it really is gzip
+                    ok = _b64.b64decode(data[:8], validate=True)[:2] == b"\x1f\x8b"
+                except (ValueError, _ba.Error):
+                    ok = False
+            if ok:
+                live.publish({"t": "screenfb", "mac": mac, "w": fw, "h": fh, "s": fs, "b": fbpp,
+                              "gz": data.decode("ascii", "replace")}, topic=f"screen:{mac}")
             self.send_text("ok\n")
         elif u.path == "/agent/done":
             try:

@@ -89,6 +89,23 @@ log "ready; polling for jobs"
 
 # screen view in the web console: while someone watches, send the visible text screen (/dev/vcsa = the console now on
 # the monitor) about once a second when it changed. Its own loop, so it keeps running while a job (an install) runs.
+# graphical screens (web desktop kbweb / kbgui) paint pixels straight into /dev/fb0, so /dev/vcsa only holds the text
+# left underneath them. While one runs, send the framebuffer instead: gzip -1 of the raw pixels (~100 KB for an 800x600
+# desktop), base64 like the text screen, only when it changed. The browser unpacks it - no image work on the server.
+fb_shot() {
+  pidof kbweb >/dev/null 2>&1 || pidof kbgui >/dev/null 2>&1 || return 1
+  [ -r /dev/fb0 ] || return 1
+  m=$(sed -n 's/^[A-Za-z]*:\([0-9]*\)x\([0-9]*\).*/\1 \2/p' /sys/class/graphics/fb0/modes 2>/dev/null | head -n1)
+  [ -n "$m" ] || m=$(tr ',' ' ' < /sys/class/graphics/fb0/virtual_size 2>/dev/null)
+  set -- $m; fw=${1:-0}; fh=${2:-0}
+  fs=$(cat /sys/class/graphics/fb0/stride 2>/dev/null); fbpp=$(cat /sys/class/graphics/fb0/bits_per_pixel 2>/dev/null)
+  [ "$fw" -gt 0 ] 2>/dev/null && [ "$fh" -gt 0 ] && [ "${fs:-0}" -gt 0 ] || return 1
+  head -c $((fs * fh)) /dev/fb0 | gzip -1 | base64 | tr -d '\n' > /run/kb-fb
+  [ "$(wc -c < /run/kb-fb)" -le 3900000 ] || return 0          # over one post's cap (huge 4K+ frame): skip this one
+  s=$(md5sum < /run/kb-fb)
+  [ "$s" != "$last" ] && curl -s -m 10 --data-binary @/run/kb-fb "$SRV/agent/screenfb?mac=$MAC&w=$fw&h=$fh&s=$fs&b=$fbpp" >/dev/null 2>&1 && last=$s
+  return 0
+}
 screen_loop() {
   last=""
   hp=${SRV#http://}
@@ -108,6 +125,7 @@ screen_loop() {
     done
     if [ "$(echo "$w" | head -n1)" = 1 ]; then
       for i in 1 2 3; do
+        if fb_shot; then sleep 1; continue; fi                       # graphical screen up: its pixels, not the text under it
         # base64: Core's curl is busybox wget, whose upload stops at the first zero byte (screens are full of them)
         # a stable frame: two identical reads 0.2 s apart, so a screen caught mid-redraw is never sent
         p=""; for t in 1 2 3 4 5; do

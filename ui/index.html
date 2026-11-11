@@ -1012,7 +1012,26 @@ async function pageMachine(page, seq) {
 const CP437 = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
 const VGA = ["#000", "#00a", "#0a0", "#0aa", "#a00", "#a0a", "#a50", "#aaa", "#555", "#55f", "#5f5", "#5ff", "#f55", "#f5f", "#ff5", "#fff"];
 ST.screens = {};
+// a graphical RAM OS screen (web desktop / kbgui): gzip of the raw framebuffer (BGRX), unpacked here and painted on a canvas
+async function drawFb(box, f) {
+  try {
+    const gz = Uint8Array.from(atob(f.gz), c => c.charCodeAt(0));
+    const raw = new Uint8Array(await new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    let cv = box.querySelector("canvas.fbscreen");
+    if (!cv || cv.width !== f.w || cv.height !== f.h) {
+      cv = el("canvas", {class: "fbscreen", title: "Live graphical screen of this machine", style: "display:block;width:100%;max-width:" + f.w + "px;height:auto;border-radius:6px"});
+      cv.width = f.w; cv.height = f.h; box.replaceChildren(cv);
+    }
+    const img = new ImageData(f.w, f.h), d = img.data, bp = f.b >> 3;
+    for (let y = 0; y < f.h; y++) {
+      let si = y * f.s, di = y * f.w * 4;
+      for (let x = 0; x < f.w; x++, si += bp, di += 4) { d[di] = raw[si + 2]; d[di + 1] = raw[si + 1]; d[di + 2] = raw[si]; d[di + 3] = 255; }
+    }
+    cv.getContext("2d").putImageData(img, 0, 0);
+  } catch (e) { /* a bad frame keeps the last good one */ }
+}
 function drawScreen(box, b64) {
+  if (b64 && typeof b64 === "object") { drawFb(box, b64); return; }
   const b = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const rows = b[0], cols = b[1], cx = b[2], cy = b[3];
   const pre = el("pre", {class: "vscreen", style: `--cols:${cols}`});
@@ -3313,11 +3332,12 @@ function liveConnect() {
       document.querySelectorAll(`[data-jobbar="${CSS.escape(ev.job)}"]`).forEach(b => {
         const i = b.querySelector("i"); if (i) i.style.width = jobProgress({type: b.dataset.type, state: "running"}, ev.log) + "%"; });
       // (overview pages get jobtick instead; this page subscribed to the full log)
-    } else if (ev.t === "screen") {
-      ST.screens[ev.mac] = ev.data;
+    } else if (ev.t === "screen" || ev.t === "screenfb") {
+      const sd = ev.t === "screenfb" ? {w: ev.w, h: ev.h, s: ev.s, b: ev.b, gz: ev.gz} : ev.data;   // graphical frame or text screen
+      ST.screens[ev.mac] = sd;
       const box = document.getElementById("vscreen");
-      if (box && ST.route[0] === "machine" && ST.route[1] === ev.mac && ST.tab === "screen") drawScreen(box, ev.data);
-      if (ST.route[0] === "wall") { const t = document.getElementById("wall-" + ev.mac.replace(/:/g, "")); if (t) drawScreen(t, ev.data); }
+      if (box && ST.route[0] === "machine" && ST.route[1] === ev.mac && ST.tab === "screen") drawScreen(box, sd);
+      if (ST.route[0] === "wall") { const t = document.getElementById("wall-" + ev.mac.replace(/:/g, "")); if (t) drawScreen(t, sd); }
     } else if ((ev.t === "agent" || ev.t === "job") && ST.route[0] === "machine" && ST.route[1] === ev.mac && ST.tab === "screen") {
       clearTimeout(wsTimer); wsTimer = setTimeout(() => render(), 400);    // e.g. a manual install starts/ends: show/hide its screen
     } else liveSoon();

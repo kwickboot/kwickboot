@@ -177,7 +177,9 @@ print("\n".join(sorted(want)))
 PY
 pick() {   # pick <list-file> <dirs...> : module paths under the given kernel dirs
   local out=$1; shift; : > $out
-  for d in "$@"; do p=kernel/$d; [ -e "$C/lib/modules/$KV/$p" ] && (cd $C/lib/modules/$KV && find $p -name '*.ko*') >> $out || true; done
+  for d in "$@"; do p=kernel/$d
+    case "$p" in *.ko.xz) for a in "$p" "${p%.xz}" "${p%.xz}.zst"; do [ -e "$C/lib/modules/$KV/$a" ] && { p=$a; break; }; done ;; esac   # Debian 12 (i386) ships plain .ko
+    [ -e "$C/lib/modules/$KV/$p" ] && (cd $C/lib/modules/$KV && find $p -name '*.ko*') >> $out || true; done
   # Datacenter/SAN NICs (mellanox, qlogic, chelsio, sfc + pensando = AMD, emulex, cisco, cavium, huawei, wangxun, mucse) are IN: iSCSI/SAN
   # servers must reach the network from the Core. Still out: netronome (~100 MB firmware) + cloud-only/rare vNICs.
   grep -vE 'ethernet/(netronome|fungible|google|microsoft|amazon|brocade|ibm|mscc|meta)/' $out > $out.f || true
