@@ -103,7 +103,8 @@ fb_shot() {
   head -c $((fs * fh)) /dev/fb0 | gzip -1 | base64 | tr -d '\n' > /run/kb-fb
   [ "$(wc -c < /run/kb-fb)" -le 3900000 ] || return 0          # over one post's cap (huge 4K+ frame): skip this one
   s=$(md5sum < /run/kb-fb)
-  [ "$s" != "$last" ] && curl -s -m 10 --data-binary @/run/kb-fb "$SRV/agent/screenfb?mac=$MAC&w=$fw&h=$fh&s=$fs&b=$fbpp" >/dev/null 2>&1 && last=$s
+  fbn=$(( ${fbn:-0} + 1 ))   # an unchanged frame is resent every ~5 s: a viewer who just opened the tab / reconnected still gets one
+  { [ "$s" != "$last" ] || [ $((fbn % 5)) = 0 ]; } && curl -s -m 10 --data-binary @/run/kb-fb "$SRV/agent/screenfb?mac=$MAC&w=$fw&h=$fh&s=$fs&b=$fbpp" >/dev/null 2>&1 && last=$s
   return 0
 }
 screen_loop() {
@@ -133,7 +134,8 @@ screen_loop() {
           c=$(md5sum < /run/kb-scr); [ "$c" = "$p" ] && break; p=$c; sleep 0.2
         done
         s=$(md5sum < /run/kb-scr)
-        [ "$s" != "$last" ] && curl -s -m 5 --data-binary @/run/kb-scr "$SRV/agent/screen?mac=$MAC" >/dev/null 2>&1 && last=$s
+        txn=$(( ${txn:-0} + 1 ))   # same for the text screen: resend unchanged every ~5 s while watched
+        { [ "$s" != "$last" ] || [ $((txn % 5)) = 0 ]; } && curl -s -m 5 --data-binary @/run/kb-scr "$SRV/agent/screen?mac=$MAC" >/dev/null 2>&1 && last=$s
         sleep 1
       done
     else last=""; sleep 3; fi
