@@ -35,8 +35,23 @@ for i in $(seq 1 $tries); do
 done
 if ! [ -f /iso/.disk/kwickboot ] && [ -n "$KB_SERVER" ] && grep -qw 'kb_tool=[a-z]*' /proc/cmdline; then
   echo "KwickBoot: network-booted from $KB_SERVER (no USB stick needed)."
-  for n in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$n" up; done; sleep 2
-  for n in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && udhcpc -i "$n" -q -n -t 6 >/dev/null 2>&1 && break; done
+  ip link set lo up 2>/dev/null
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do ip link set "$n" up; done
+  for t in 1 2 3 4 5 6 7 8; do   # slow PHYs (RTL8168 class) report carrier ~2-4 s after link up: poll, do not guess
+    up=; for n in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && up=1; done
+    [ -n "$up" ] && break; sleep 1
+  done
+  US=; [ -x /etc/udhcpc.script ] && US="-s /etc/udhcpc.script"   # the Core's script: busybox's default is not in this image
+  for n in $(ls /sys/class/net | grep -v '^lo$'); do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && udhcpc -i "$n" $US -q -n -t 6 >/dev/null 2>&1 && break; done
+  # the web console sees this tool too: Screen view + Remote control (kbvnc, before the menu UI picks its input
+  # devices) + terminal, through the agent in screen-only mode - it never runs jobs or touches a disk here
+  if [ -e /dev/fb0 ] && [ -x /bin/kbvnc ]; then
+    modprobe -q uinput 2>/dev/null; /bin/kbvnc > /dev/null 2>&1 &
+    for i in $(seq 1 30); do [ -e /run/kb-uinput ] && break; sleep 0.1; done
+  fi
+  KT=$(sed -n 's/.*kb_tool=\([a-z]*\).*/\1/p' /proc/cmdline)
+  ( for i in $(seq 1 20); do wget -q -T 10 -O /tmp/agent.sh "http://$KB_SERVER/scripts/agent.sh" && break; sleep 3; done
+    KB_SCREEN_ONLY="${KT:-tool}" exec sh /tmp/agent.sh > /var/log/pxe-agent.log 2>&1 ) &
 elif ! [ -f /iso/.disk/kwickboot ]; then
   echo; echo "The KwickBoot ISO was not found (no device labelled KWICKBOOT)."
   echo "Write the ISO to the USB stick in DD / raw mode, or attach it as a CD/DVD, and start again."

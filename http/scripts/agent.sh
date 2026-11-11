@@ -61,39 +61,11 @@ missing_drivers() { for d in /sys/bus/pci/devices/*; do [ -e $d/driver ] || case
 # a driver that bound but could not fetch its firmware (Core/hw do not bake every blob) -> the on-demand firmware pack has it
 fw_failed() { dmesg 2>/dev/null | grep -qiE 'Direct firmware load for .* failed|firmware: failed to load' && echo x; }
 
-log "agent start mac=$MAC ip=$(ip4) server=$SRV"
-# keep the DHCP lease alive for long jobs
-pgrep -x udhcpc >/dev/null || udhcpc -b -q -i "$IFC" -t 10 >/dev/null 2>&1 &
-
-hello booting "RAM OS up, scanning hardware"
-need hw                                   # storage, filesystems, input + scan tools (Core itself = network + loader)
-# UEFI variables (boot order after installs): the efivarfs driver arrives with the hw pack, mount it now
-[ -d /sys/firmware/efi ] && ! grep -q " /sys/firmware/efi/efivars " /proc/mounts && { modprobe -q efivarfs 2>/dev/null; mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; }
-# extended hardware: fetch its firmware first (so the drivers bind with firmware present), then the driver pack
-[ -n "$(missing_drivers)" ] && { need firmware; need drivers; }
-# a device whose driver loaded but whose firmware Core lacks: pull the firmware pack and re-trigger driver binding
-if [ -n "$(fw_failed)" ]; then
-  need firmware
-  for a in $(cat /sys/bus/*/devices/*/modalias 2>/dev/null | sort -u); do modprobe -q "$a" 2>/dev/null; done
-fi
-for i in 1 2 3; do wget -qO /tmp/prep.sh "$SRV/scripts/prep.sh" && sh /tmp/prep.sh > $TK/prep.log 2>&1 && break; sleep 10; done
-# prep.sh already posted the inventory; add an initial preflight (no target disk yet)
-sh $TK/preflight.sh > $TK/preflight.txt 2>&1
-curl -s -m 20 --data-binary @$TK/preflight.txt "$SRV/report?kind=preflight&mac=$MAC" >/dev/null
-hello ready "inventory + preflight reported"
-log "ready; polling for jobs"
-# full detail (SMART, NVMe health, sensors) arrives a moment later, without delaying READY
-# then preload the install pack (9 MB of RAM) so an install job starts writing the disk immediately
-[ -f /etc/kb-core-version ] && ( need diag && sh $TK/inventory.sh > $TK/inventory.txt 2>&1 \
-   && curl -s -m 20 --data-binary @$TK/inventory.txt "$SRV/report?kind=inventory&mac=$MAC" >/dev/null && log "detailed inventory reported"; need install ) &
-
-# screen view in the web console: while someone watches, send the visible text screen (/dev/vcsa = the console now on
-# the monitor) about once a second when it changed. Its own loop, so it keeps running while a job (an install) runs.
 # graphical screens (web desktop kbweb / kbgui) paint pixels straight into /dev/fb0, so /dev/vcsa only holds the text
 # left underneath them. While one runs, send the framebuffer instead: gzip -1 of the raw pixels (~100 KB for an 800x600
 # desktop), base64 like the text screen, only when it changed. The browser unpacks it - no image work on the server.
 fb_shot() {
-  pidof kbweb >/dev/null 2>&1 || pidof kbgui >/dev/null 2>&1 || return 1
+  pidof kbweb kbgui kbrescue-fb >/dev/null 2>&1 || return 1   # desktop, kbgui or the Rescue menu UI
   [ -r /dev/fb0 ] || return 1
   m=$(sed -n 's/^[A-Za-z]*:\([0-9]*\)x\([0-9]*\).*/\1 \2/p' /sys/class/graphics/fb0/modes 2>/dev/null | head -n1)
   [ -n "$m" ] || m=$(tr ',' ' ' < /sys/class/graphics/fb0/virtual_size 2>/dev/null)
@@ -147,6 +119,44 @@ screen_loop() {
     else last=""; sleep 3; fi
   done
 }
+
+# An OS-library tool (Rescue & Wipe) network-booted from the server runs ONLY this part of the agent: the web console's
+# Screen view, Remote control and terminal. No inventory, no jobs, nothing that touches a disk.
+if [ -n "${KB_SCREEN_ONLY:-}" ]; then
+  log "screen-only agent for tool $KB_SCREEN_ONLY, mac=$MAC ip=$(ip4) server=$SRV"
+  ( while :; do hello busy "$KB_SCREEN_ONLY tool running"; sleep 30; done ) &
+  screen_loop
+  exit 0
+fi
+
+log "agent start mac=$MAC ip=$(ip4) server=$SRV"
+# keep the DHCP lease alive for long jobs
+pgrep -x udhcpc >/dev/null || udhcpc -b -q -i "$IFC" -t 10 >/dev/null 2>&1 &
+
+hello booting "RAM OS up, scanning hardware"
+need hw                                   # storage, filesystems, input + scan tools (Core itself = network + loader)
+# UEFI variables (boot order after installs): the efivarfs driver arrives with the hw pack, mount it now
+[ -d /sys/firmware/efi ] && ! grep -q " /sys/firmware/efi/efivars " /proc/mounts && { modprobe -q efivarfs 2>/dev/null; mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; }
+# extended hardware: fetch its firmware first (so the drivers bind with firmware present), then the driver pack
+[ -n "$(missing_drivers)" ] && { need firmware; need drivers; }
+# a device whose driver loaded but whose firmware Core lacks: pull the firmware pack and re-trigger driver binding
+if [ -n "$(fw_failed)" ]; then
+  need firmware
+  for a in $(cat /sys/bus/*/devices/*/modalias 2>/dev/null | sort -u); do modprobe -q "$a" 2>/dev/null; done
+fi
+for i in 1 2 3; do wget -qO /tmp/prep.sh "$SRV/scripts/prep.sh" && sh /tmp/prep.sh > $TK/prep.log 2>&1 && break; sleep 10; done
+# prep.sh already posted the inventory; add an initial preflight (no target disk yet)
+sh $TK/preflight.sh > $TK/preflight.txt 2>&1
+curl -s -m 20 --data-binary @$TK/preflight.txt "$SRV/report?kind=preflight&mac=$MAC" >/dev/null
+hello ready "inventory + preflight reported"
+log "ready; polling for jobs"
+# full detail (SMART, NVMe health, sensors) arrives a moment later, without delaying READY
+# then preload the install pack (9 MB of RAM) so an install job starts writing the disk immediately
+[ -f /etc/kb-core-version ] && ( need diag && sh $TK/inventory.sh > $TK/inventory.txt 2>&1 \
+   && curl -s -m 20 --data-binary @$TK/inventory.txt "$SRV/report?kind=inventory&mac=$MAC" >/dev/null && log "detailed inventory reported"; need install ) &
+
+# screen view in the web console: while someone watches, send the visible text screen (/dev/vcsa = the console now on
+# the monitor) about once a second when it changed. Its own loop, so it keeps running while a job (an install) runs.
 screen_loop &
 
 run_job() {   # $1=id $2=type, params exported as env
