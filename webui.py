@@ -637,6 +637,11 @@ def handle(h, method, _preauth=False):
             live.serve_vnc_direct(h, host.strip("[]"), int(port), view_only=view,
                                   on_end=lambda why: audit(who_, f"HARDWARE SCREEN closed {name} {mac}: {why}", ip))
             return True
+        if q.get("target", [""])[0] == "screen":        # remote control of the RAM OS's own screen (kbvnc, via kbpty tcp:5901)
+            audit(who_, f"REMOTE CONTROL opened on {name} {mac}{' (view only)' if view else ''}", ip)
+            live.serve_vnc(h, mac, on_end=lambda why: audit(who_, f"REMOTE CONTROL closed {name} {mac}: {why}", ip),
+                           view_only=view, kind="rfb")
+            return True
         if not db.q1("SELECT 1 FROM jobs WHERE mac=? AND type='manual' AND state='running'", mac):
             h.send_error(403)
             return True

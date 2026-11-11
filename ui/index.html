@@ -1090,6 +1090,7 @@ async function openVnc(mac, holder, status, target) {   // target "bmc": the har
   rfb.addEventListener("connect", () => { if (VNC && VNC.rfb === rfb) status.textContent = can("operator") ? "connected — click into the screen to type" : "connected — view only"; });
   rfb.addEventListener("disconnect", e => {
     if (!VNC || VNC.rfb !== rfb) return;
+    if (target === "screen") { status.textContent = e.detail && e.detail.clean ? "remote control ended" : "could not connect to the machine's screen"; return; }
     if (target) { status.textContent = e.detail && e.detail.clean ? "disconnected" : "could not connect (address, port or password?)"; return; }
     status.textContent = "disconnected — retrying while the installer runs…";
     VNC.retry = setTimeout(() => { if (VNC && VNC.rfb === rfb && ST.route[0] === "machine" && ST.tab === "screen") openVnc(mac, holder, status); }, 5000);
@@ -1184,16 +1185,24 @@ async function tabScreen(body, d, m) {
   const s = d.summary, ram = s.agent && ["ready", "busy", "booting"].includes(s.agent.state) && s.agent_age !== null && s.agent_age < 90;
   const man = (d.jobs || []).find(j => j.type === "manual" && j.state === "running");
   if (man) body.append(installerCard(s, d)); else if (VNC && VNC.mac === s.mac && !VNC.target) closeVnc();
+  if (VNC && VNC.target === "screen" && VNC.mac !== s.mac) closeVnc();      // remote control belongs to the machine it was opened on
   const hw = hardwareCard(s, d); if (hw) body.append(hw);
   const why = !s.agent || !s.agent.state ? "This machine has not run the KwickBoot RAM OS yet."
     : `The KwickBoot RAM OS is not running on this machine (last contact ${ago(s.agent_age)}, state: ${s.agent.state}). It is probably running its installed system or is switched off.`;
   const box = el("div", {id: "vscreen", class: "vscreenwrap"}, ram ? el("div", {class: "faint", style: "padding:24px", text: "Connecting to the screen…"})
     : el("div", {style: "padding:24px;color:#aaa;font-size:13.5px;line-height:1.6"}, el("div", {text: "No picture. " + why}),
         el("div", {text: "To see it here: set Next boot → RAM OS below, then Restart (or Power on). With a BMC or Intel AMT the real screen is available at any time."})));
-  body.append(el("div", {class: "card"}, el("div", {class: "row", style: "margin-bottom:10px"}, el("h2", {style: "margin:0;flex:1", text: "Screen"}),
-      el("span", {class: "pill " + (ram ? "ok" : ""), text: ram ? "live" : "not in the RAM OS"})),
+  const rc = el("div"), rcStatus = el("span", {class: "faint", style: "font-size:12.5px"});
+  const rcOn = () => VNC && VNC.mac === s.mac && VNC.target === "screen";
+  const rcBtn = can("operator") && ram ? el("button", {class: "btn sm", title: "Use this machine's mouse and keyboard from here (recorded in the audit log)",
+    onclick: () => { if (rcOn()) { closeVnc(); rc.replaceChildren(); box.style.display = ""; rcStatus.textContent = ""; rcBtn.textContent = "Remote control"; }
+                     else { closeTerminal(); box.style.display = "none"; openVnc(s.mac, rc, rcStatus, "screen"); rcBtn.textContent = "Stop remote control"; } }},
+    rcOn() ? "Stop remote control" : "Remote control") : null;
+  body.append(el("div", {class: "card"}, el("div", {class: "row", style: "margin-bottom:10px;gap:8px"}, el("h2", {style: "margin:0;flex:1", text: "Screen"}),
+      rcStatus, rcBtn, el("span", {class: "pill " + (ram ? "ok" : ""), text: ram ? "live" : "not in the RAM OS"})),
     el("p", {class: "mute", style: "margin:0 0 12px;font-size:13px", text: "What the machine's monitor shows while it runs the KwickBoot RAM OS (installs included), about once a second. Installed systems and firmware screens need a BMC or Intel AMT console."}),
-    box, can("operator") ? screenControls(s, d) : null));
+    box, rc, can("operator") ? screenControls(s, d) : null));
+  if (rcOn()) { rc.append(VNC.box); box.style.display = "none"; rcStatus.textContent = "connected"; }
   if (can("admin")) {      // root shell of the RAM OS in the browser
     const holder = el("div");
     const btn = el("button", {id: "termbtn", class: "btn sm", disabled: !ram, onclick: () => { if (TERM && TERM.mac === s.mac) closeTerminal(); else { openTerminal(s.mac, holder); btn.textContent = "Close terminal"; } }},

@@ -124,6 +124,12 @@ screen_loop() {
       touch /run/kb-pty-$sid
       command -v kbpty >/dev/null && ( kbpty "${hp%:*}" "${hp#*:}" "$MAC" "$TOKEN" "$sid" tcp:5900; rm -f /run/kb-pty-$sid ) >/dev/null 2>&1 &
     done
+    # remote control of THIS screen (web console): kbvnc listens on 127.0.0.1:5901 once /run/kb-uinput exists
+    for sid in $(echo "$w" | sed -n 's/^RFB \([0-9a-f]\{16\}\)$/\1/p'); do
+      [ -e /run/kb-pty-$sid ] || [ ! -e /run/kb-uinput ] && continue
+      touch /run/kb-pty-$sid
+      command -v kbpty >/dev/null && ( kbpty "${hp%:*}" "${hp#*:}" "$MAC" "$TOKEN" "$sid" tcp:5901; rm -f /run/kb-pty-$sid ) >/dev/null 2>&1 &
+    done
     if [ "$(echo "$w" | head -n1)" = 1 ]; then
       for i in 1 2 3; do
         if fb_shot; then sleep 1; continue; fi                       # graphical screen up: its pixels, not the text under it

@@ -744,6 +744,38 @@ _LB_CHAIN = ("  for f in /EFI/Microsoft/Boot/bootmgfw.efi /EFI/BOOT/BOOTX64.EFI;
 _LB_EXIT = "  echo 'KwickBoot: handing over to the firmware - next boot entry (local disk)'\n  exit 1\n}\n"
 
 
+# DMI placeholders vendors leave in the firmware: never shown as a model or serial
+JUNK_DMI = ("default string", "to be filled by o.e.m.", "to be filled by oem", "system product name", "system serial number",
+            "system manufacturer", "not specified", "not applicable", "none", "o.e.m.", "oem", "0123456789", "123456789",
+            "chassis serial number", "base board serial number", "unknown", "type1productconfigid", "x.x")
+
+
+def local_ident(mac):
+    """model / serial / firmware / TPM for the on-machine page (/local), from the machine's latest inventory report.
+    DMI placeholders ('Default string', 'To be filled by O.E.M.') are dropped; the board name stands in for a missing
+    product name, e.g. 'Intel NUC32D 2C' on a mini PC whose product field says 'Default string'."""
+    inv, _ = db.latest_report(mac, "inventory")
+
+    def g(rx):
+        m = re.search(rx, inv, re.M)
+        return m.group(1).strip() if m else ""
+
+    def ok(v):
+        return v if v and v.strip().lower() not in JUNK_DMI else ""
+    vendor, product, board = ok(g(r"vendor=(.*?) product=")), ok(g(r"product=(.*?) version=")), ok(g(r"board=(.*?) rev="))
+    name = product or board
+    model = name if (name and vendor and name.lower().startswith(vendor.lower())) else " ".join(x for x in (vendor, name) if x)
+    serial = ok(g(r"^\s*serial=(.*?) uuid="))
+    fw = tpm = ""
+    sec = re.search(r"boot=(\w+) secure_boot=(\w+) tpm=(\w+)", inv)
+    if sec:
+        uefi = sec.group(1).lower() == "uefi"
+        sb = sec.group(2).lower() in ("on", "1", "yes", "enabled")
+        fw = ("UEFI, Secure Boot " + ("ON" if sb else "off")) if uefi else "legacy BIOS"
+        tpm = {"2": "2.0", "2.0": "2.0", "1": "1.2", "1.2": "1.2"}.get(sec.group(3).lower(), "none")
+    return {"model": model, "serial": serial, "firmware": fw, "tpm": tpm}
+
+
 def local_entry(method="auto"):
     return _LB_HEAD + {"chainload": _LB_CHAIN, "exit": ""}.get(method, _LB_CFG + _LB_CHAIN) + _LB_EXIT
 
@@ -1932,13 +1964,18 @@ class Handler(SimpleHTTPRequestHandler):
                                "os": pr.get("OS") or pr.get("os") or "", "disk": pr.get("disk") or ""}
             except Exception:
                 jobinfo = None
+            try:
+                ident = local_ident(mac) if mac else {}
+            except Exception:
+                ident = {}
             data = {"mac": mac, "name": m.get("name") or "", "approved": bool(m.get("approved")),
+                    "model": ident.get("model", ""), "serial": ident.get("serial", ""),
+                    "firmware": ident.get("firmware", ""), "tpm": ident.get("tpm", ""),
                     "department": dept or "", "cpu": m.get("cpu") or "", "ram": m.get("ram") or "",
                     "health": m.get("health_level") or "", "net_addr": m.get("agent_ip") or "",
                     "disks": disks, "disklist": disklist, "status": status, "job": jobinfo,
                     "status2": "Pick an OS below, or let IT start it from the web console. Both stay in sync.",
-                    "advice": ["Read-only facts shown without sign-in; starting an install or rescue needs IT credentials.",
-                               "The live local view (model, firmware, TPM) appears on the machine's own screen."]}
+                    "advice": ["Read-only facts shown without sign-in; starting an install or rescue needs IT credentials."]}
             self.send_text(json.dumps(data), "application/json")
             return
         if u.path == "/seat/session":         # a diskless seat polls this every few seconds: run (minutes left) or lock
@@ -2093,7 +2130,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             # line 1: screen watched (1/0); then "PTY <sid>" for each terminal waiting for this machine to dial in
             self.send_text("\n".join(["1" if live.watched(mac) else "0"] +
-                                     [f"{'VNC' if k == 'vnc' else 'PTY'} {s}" for s, k in live.pty_pending(mac)]) + "\n")
+                                     [("VNC" if k == "vnc" else "RFB" if k == "rfb" else "PTY") + " " + s
+                                      for s, k in live.pty_pending(mac)]) + "\n")   # RFB = remote control of the RAM OS screen
             return
         if u.path == "/agent/pty":            # kbpty in the RAM OS dials in for a terminal an admin opened
             mac = norm_mac(q.get("mac", [""])[0])

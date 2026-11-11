@@ -174,7 +174,14 @@ static gboolean input_cb(GIOChannel *src, GIOCondition cond, gpointer udata){
     (void)cond; int fd = g_io_channel_unix_get_fd(src); struct indev *d = udata;
     struct input_event ev; int rd; int moved=0, redraw=0;
     while ((rd = read(fd, &ev, sizeof ev)) == sizeof ev){
-        if (ev.type == EV_REL){ if(ev.code==REL_X){g_cx+=ev.value;moved=1;redraw=1;} else if(ev.code==REL_Y){g_cy+=ev.value;moved=1;redraw=1;} }
+        if (ev.type == EV_REL){ if(ev.code==REL_X){g_cx+=ev.value;moved=1;redraw=1;} else if(ev.code==REL_Y){g_cy+=ev.value;moved=1;redraw=1;}
+            else if (ev.code==REL_WHEEL || ev.code==REL_HWHEEL){   // mouse wheel: WebKit scrolls one line step per notch
+                if (moved){ send_motion(); moved=0; }               // (positive = up / left in WebKit; REL_HWHEEL + is right)
+                struct wpe_input_axis_event ae = { wpe_input_axis_event_type_motion, 0, g_cx, g_cy,
+                    ev.code==REL_WHEEL ? 0 : 1, ev.code==REL_WHEEL ? ev.value : -ev.value, g_btnmods };
+                wpe_view_backend_dispatch_axis_event(g_vb, &ae);
+                redraw=1;
+            } }
         else if (ev.type == EV_ABS && d->is_abs){     // VM tablet OR touchscreen (single-touch ABS_* or multitouch ABS_MT_POSITION_*)
             if ((ev.code==ABS_X || ev.code==ABS_MT_POSITION_X) && d->xmax>d->xmin){ g_cx=(int)((long)(ev.value-d->xmin)*(g_xres-1)/(d->xmax-d->xmin)); moved=1; redraw=1; }
             else if ((ev.code==ABS_Y || ev.code==ABS_MT_POSITION_Y) && d->ymax>d->ymin){ g_cy=(int)((long)(ev.value-d->ymin)*(g_yres-1)/(d->ymax-d->ymin)); moved=1; redraw=1; }

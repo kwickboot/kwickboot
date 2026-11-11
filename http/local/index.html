@@ -85,7 +85,7 @@
 <body>
 <div class="wrap">
   <header>
-    <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 2 4 13h6l-1 9 9-11h-6z"/></svg></div>
+    <div class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M16 7.6v8.2" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"/><path d="M10.2 11.2a8.2 8.2 0 1 0 11.6 0" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"/></svg></div>
     <div class="brand"><h1>KwickBoot</h1><p data-i18n="subtitle">the RAM OS with AI built in</p></div>
     <div class="status"><span class="dot" id="dot"></span><span class="chip" id="chip">READY</span><span id="chipsub" class="muted">managed</span></div>
   </header>
@@ -172,11 +172,11 @@ function render(d){
   $("#net_addr").textContent = d.net_addr || "—"; $("#net_addr").className = "v"+(d.net_addr?" good":"");
   $("#m_name").textContent = (d.name||"—") + (d.department?("  ·  "+d.department):"");
   renderChip();
-  // live install/rescue/wipe progress - mirrors a job started HERE or by IT from the web console (shared job log)
+  // live install/restore/wipe progress - mirrors a job started HERE or by IT from the web console (shared job log)
   const j = d.job;
   if (j) {
     const running = (j.state==="running");
-    const verb = j.type==="rescue"? t("rescuing") : j.type==="wipe"? t("wiping") : t("installing");
+    const verb = j.type==="wipe"? t("wiping") : j.type==="restore"? t("restoring") : t("installing");
     const osName = j.os ? (" "+j.os.charAt(0).toUpperCase()+j.os.slice(1)) : "";
     const pct = Math.max(3, Math.min(100, Math.round((j.step/(j.total||8))*100)));
     $("#status").textContent = running ? (verb+osName) : ((j.state==="failed"? t("failed") : t("done"))+osName);

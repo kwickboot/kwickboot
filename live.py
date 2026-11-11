@@ -252,7 +252,7 @@ def _end(sid, why):
             p["sock"].shutdown(2)
         except OSError:
             pass
-    if p.get("kind") == "vnc":                        # noVNC: close its WebSocket
+    if p.get("kind") in ("vnc", "rfb"):               # noVNC: close its WebSocket
         try:
             p["client"].send(frame(struct.pack("!H", 1000), 8))
         except OSError:
@@ -300,7 +300,7 @@ def pty_attach(sid, sock):
             data = sock.recv(16384)
             if not data:
                 break
-            if p["kind"] == "vnc":                  # raw RFB bytes to noVNC (binary frame)
+            if p["kind"] in ("vnc", "rfb"):         # raw RFB bytes to noVNC (binary frame)
                 try:
                     p["client"].send(frame(data, 2))
                 except OSError:
@@ -448,7 +448,7 @@ class RfbViewOnly:
         return out
 
 
-def serve_vnc(h, mac, on_end=None, view_only=False):
+def serve_vnc(h, mac, on_end=None, view_only=False, kind="vnc"):
     """noVNC's WebSocket for the manual-install VM's screen on `mac`: raw RFB bytes both ways (authorised by the caller).
     The machine's RAM OS dials in (kbpty tcp:5900) within a few seconds of this session appearing in /agent/watch."""
     key = h.headers.get("Sec-WebSocket-Key", "")
@@ -467,7 +467,7 @@ def serve_vnc(h, mac, on_end=None, view_only=False):
     h.wfile.flush()
     h.close_connection = True
     c = Client(h.connection, lambda m: True)
-    sid = pty_open(c, mac, on_end, kind="vnc")
+    sid = pty_open(c, mac, on_end, kind=kind)          # "vnc" = manual-install VM (tcp:5900), "rfb" = RAM OS screen (kbvnc, tcp:5901)
     flt = RfbViewOnly() if view_only else None
     try:
         h.connection.settimeout(None)                 # a still installer screen means a silent browser: no timeout

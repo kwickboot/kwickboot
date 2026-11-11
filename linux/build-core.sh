@@ -102,7 +102,7 @@ CC_READY=0
 ccbuild() {   # $1 = output path inside $R, $2 = source .c (host path), $3.. = extra gcc flags
   local out=$1 src=$2; shift 2
   if [ "$ARCH" = amd64 ]; then
-    gcc "$@" -o "$R$out" "$src"
+    gcc "$@" -o "$R$out" "$src" ${CCLIBS:-}            # CCLIBS: libraries, after the source (static link order)
   else
     if [ "$CC_READY" = 0 ]; then
       chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive \
@@ -110,7 +110,7 @@ ccbuild() {   # $1 = output path inside $R, $2 = source .c (host path), $3.. = e
       CC_READY=1
     fi
     local b; b=$(basename "$src"); cp "$src" "$C/tmp/$b"
-    chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c "gcc $* -o /tmp/kbout.bin /tmp/$b" || return 1
+    chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c "gcc $* -o /tmp/kbout.bin /tmp/$b ${CCLIBS:-}" || return 1
     cp "$C/tmp/kbout.bin" "$R$out"
   fi
 }
@@ -220,7 +220,7 @@ pick $B/core.sel drivers/net/ethernet drivers/net/usb drivers/net/phy drivers/ne
 # input + VM video by NAME so they are present on EVERY arch (fixes evdev missing on i386 -> kbgui had no
 # input): evdev + psmouse (PS/2 mice) + atkbd (PS/2 kbd) + serio_raw; bochs = bochs-drm, the standard
 # QEMU/Proxmox/Bochs VGA the local GUI draws on.
-pickmod $B/core.sel evdev mousedev psmouse atkbd serio_raw bochs bochs-drm
+pickmod $B/core.sel evdev mousedev psmouse atkbd serio_raw bochs bochs-drm uinput
 python3 $B/resolve.py $C/lib/modules/$KV $B/core.sel > $B/modules.all
 install_mods $B/modules.all $R
 cp $C/lib/modules/$KV/modules.{order,builtin,builtin.modinfo} $R/lib/modules/$KV/ 2>/dev/null || true
@@ -268,6 +268,13 @@ open(r + "/etc/motd", "w").write(ramos.MOTD)
 PY
 # web console terminal (admins): our own small pty relay, static so it needs nothing else in the Core (linux/kbpty.c)
 ccbuild /bin/kbpty "${KB_HOME:-/opt/pxe-toolkit}/linux/kbpty.c" -static -Os -s -Wall
+# kbvnc: remote control of the screen from the web console (RFB on 127.0.0.1:5901 + uinput tablet/keyboard).
+# zlib-compressed updates when static zlib is available (zlib1g-dev), raw-only otherwise; no remote control if neither builds.
+[ "$ARCH" = amd64 ] || chroot $C /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive \
+  apt-get install -y -q --no-install-recommends zlib1g-dev >/dev/null 2>&1 || true
+CCLIBS=-lz ccbuild /bin/kbvnc "${KB_HOME:-/opt/pxe-toolkit}/linux/kbvnc.c" -static -O2 -s 2>/dev/null \
+  || ccbuild /bin/kbvnc "${KB_HOME:-/opt/pxe-toolkit}/linux/kbvnc.c" -static -O2 -s -DKB_NO_ZLIB 2>/dev/null \
+  || echo "    (kbvnc not built: no remote control on this Core)"
 # branded boot splash (plymouth-style): KwickBoot logo + progress bar on the framebuffer, shown by init as Core comes up.
 # Built on the host (gcc + python3-pil + a kbd console font); links Core's glibc at runtime. Plain text boot if absent or
 # the PC has no 32bpp framebuffer (kbsplash exits 2 -> init just skips it).
@@ -441,6 +448,13 @@ splash 100 "Ready" 2.0
 # Adaptive UI: pick the best UI for this machine's power. RICH (capable: DRM/KMS GPU + enough RAM) -> the browser desktop
 # (kb-desktop, fetched on demand); STANDARD (any framebuffer) -> the native kbgui; ANCIENT (no fb) -> the text console.
 # Each tier falls through to the next if its program is missing or fails, so weak/old hardware always lands somewhere.
+# remote control (web console): kbvnc shares /dev/fb0 on 127.0.0.1:5901 and creates a virtual tablet + keyboard (uinput).
+# Started BEFORE the screens: kbweb/kbgui pick their input devices when they start (kbvnc touches /run/kb-uinput when ready).
+if [ -e /dev/fb0 ] && [ -x /bin/kbvnc ]; then
+  ip link set lo up 2>/dev/null                # kbvnc listens on 127.0.0.1; the network step only raises physical cards
+  modprobe -q uinput 2>/dev/null; /bin/kbvnc > /dev/null 2>&1 &
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do [ -e /run/kb-uinput ] && break; sleep 0.1; done
+fi
 RAMKB=$(awk '/^MemTotal/{print $2}' /proc/meminfo 2>/dev/null)
 # RICH (kbweb browser) needs a framebuffer (/dev/fb0) + enough RAM. kbweb paints WebKit on the CPU and blits straight to
 # fb0 - NO GPU, NO DRM master, NO KMS/GL - so it runs wherever kbgui does (efifb, simpledrm, hyperv_drm, virtio-gpu, real
@@ -500,7 +514,8 @@ mkpack secure /usr/bin/curl
 # Cache-guarded: a normal rebuild reuses the existing pack; force a rebuild with --packs.
 if [ "$ARCH" != amd64 ]; then
   echo ">>> Core: desktop (RICH WebKit) pack skipped on $ARCH - seats use the kbgui/text tiers"
-elif [ -s $OUT/packs/desktop.sqfs ] && [ "${1:-}" != --packs ]; then
+elif [ -s $OUT/packs/desktop.sqfs ] && [ "${1:-}" != --packs ] \
+     && [ "$(cat $B/desktop.kv 2>/dev/null)" = "$(sha256sum < "$KB_HOME/kbweb.c" | cut -c1-64)" ]; then   # rebuilt when kbweb.c changes
   echo ">>> Core: desktop pack cached ($(du -h $OUT/packs/desktop.sqfs | cut -f1))"
 else
   echo ">>> Core: desktop pack (kbweb CPU framebuffer WPE browser) - building"
@@ -547,6 +562,7 @@ else
   for base in $R; do (cd $base && find . -type f 2>/dev/null) | while read -r x; do if [ -f "$DPK/$x" ] && cmp -s "$DPK/$x" "$base/$x"; then rm -f "$DPK/$x"; fi; done; done
   mksquashfs $DPK $OUT/packs/desktop.sqfs.new -comp zstd -Xcompression-level 19 -b 1M -noappend -quiet -all-root && mv -f $OUT/packs/desktop.sqfs.new $OUT/packs/desktop.sqfs
   echo "    desktop pack: $(du -h $OUT/packs/desktop.sqfs | cut -f1)"
+  sha256sum < "$KB_HOME/kbweb.c" | cut -c1-64 > $B/desktop.kv          # cache key: the kbweb this pack was built from
 fi
 mkpack diag /usr/sbin/smartctl /usr/sbin/nvme /usr/sbin/hdparm /usr/bin/lshw /usr/bin/lsusb /usr/bin/sensors /usr/sbin/sensors-detect \
   /usr/bin/ipmitool /usr/sbin/memtester /usr/bin/stress-ng /usr/sbin/ethtool /usr/sbin/mdadm /usr/sbin/lvm /usr/sbin/cryptsetup \
