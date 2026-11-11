@@ -210,7 +210,7 @@ echo ">>> Core: ALL wired network drivers + their firmware (the network brings e
 # mouse the moment it starts - the GUI runs from Core before any pack loads, so these cannot wait for the hw pack.
 pick $B/core.sel drivers/net/ethernet drivers/net/usb drivers/net/phy drivers/net/mdio drivers/net/pcs drivers/ptp drivers/pps \
   drivers/usb/host drivers/usb/core drivers/usb/common drivers/virtio drivers/net/virtio_net.ko.xz drivers/net/vmxnet3 \
-  drivers/net/hyperv drivers/hv drivers/block/loop.ko.xz fs/squashfs fs/overlayfs \
+  drivers/net/hyperv drivers/hv drivers/block/loop.ko.xz drivers/block/zram fs/squashfs fs/overlayfs \
   drivers/input/evdev.ko.xz drivers/input/serio/hyperv-keyboard.ko.xz \
   drivers/hid/hid.ko.xz drivers/hid/usbhid drivers/hid/hid-generic.ko.xz drivers/hid/hid-hyperv.ko.xz drivers/hid/hid-multitouch.ko.xz \
   drivers/gpu/drm/drm.ko.xz drivers/gpu/drm/drm_kms_helper.ko.xz drivers/gpu/drm/drm_shmem_helper.ko.xz drivers/gpu/drm/ttm \
@@ -397,6 +397,16 @@ echo /sbin/modprobe > /proc/sys/kernel/modprobe   # lets the kernel load filesys
 for m in loop squashfs overlay evdev psmouse atkbd bochs bochs-drm virtio_gpu hyperv_drm vmwgfx vboxvideo; do modprobe -q $m 2>/dev/null; done   # not tied to a probeable bus device: load explicitly. evdev/psmouse/atkbd = local GUI input (incl. PS/2 mouse+kbd); bochs = QEMU/Proxmox std VGA fb; virtio_gpu/vmwgfx/vboxvideo = GBM DRM for RICH; hyperv_drm = fb-only -> kbgui
 # device nodes now + hotplug via netlink (Debian kernels have no /proc/sys/kernel/hotplug; writing it printed an error on screen)
 mdev -s 2>/dev/null; mdev -d 2>/dev/null
+# zram: compressed swap in RAM (zstd, sized at half of RAM). A RAM OS has no disk to swap to, so without it a full RAM
+# means the OOM killer ends the desktop or a job; with it idle pages (WebKit heap, agent) compress ~2-3x first.
+# Costs nothing until memory is tight; skipped silently where zram is unavailable.
+if modprobe -q zram 2>/dev/null && [ -e /sys/block/zram0 ]; then
+  echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null
+  echo $(( $(awk '/^MemTotal/{print $2}' /proc/meminfo) * 512 )) > /sys/block/zram0/disksize   # kB * 1024 / 2
+  [ -e /dev/zram0 ] || mdev -s 2>/dev/null
+  mkswap /dev/zram0 >/dev/null 2>&1 && { swapon -p 100 /dev/zram0 2>/dev/null || swapon /dev/zram0 2>/dev/null; }
+  echo 100 > /proc/sys/vm/swappiness 2>/dev/null; echo 0 > /proc/sys/vm/page-cluster 2>/dev/null   # zram: swap early, no readahead
+fi
 splash 30 "Loading drivers"
 # network: DHCP only on a wired interface that HAS a link (skip link-down cards entirely - no wasted DHCP
 # timeout). The NIC we booted from already has carrier, so usually there is nothing to wait for; wait once,
