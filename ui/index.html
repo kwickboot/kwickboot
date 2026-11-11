@@ -1012,6 +1012,18 @@ async function pageMachine(page, seq) {
 const CP437 = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
 const VGA = ["#000", "#00a", "#0a0", "#0aa", "#a00", "#a0a", "#a50", "#aaa", "#555", "#55f", "#5f5", "#5ff", "#f55", "#f5f", "#ff5", "#fff"];
 ST.screens = {};
+// scale a screen canvas to the panel: centered, as large as fits the panel width and (on the Screen tab) the visible
+// window height; Screen-wall tiles fit their width only. Keeps the machine's aspect ratio.
+function fitFb(cv, box) {
+  const aw = Math.max(1, (box.clientWidth || cv.width) - 2);
+  let sc = aw / cv.width;
+  if (!(box.id || "").startsWith("wall-")) {
+    const ah = Math.max(240, window.innerHeight - Math.max(0, box.getBoundingClientRect().top) - 24);
+    sc = Math.min(sc, ah / cv.height);
+  }
+  cv.style.width = Math.floor(cv.width * sc) + "px"; cv.style.height = Math.floor(cv.height * sc) + "px";
+}
+window.addEventListener("resize", () => document.querySelectorAll("canvas.fbscreen").forEach(cv => fitFb(cv, cv.parentElement)));
 // a graphical RAM OS screen (web desktop / kbgui): gzip of the raw framebuffer (BGRX), unpacked here and painted on a canvas
 async function drawFb(box, f) {
   try {
@@ -1019,9 +1031,11 @@ async function drawFb(box, f) {
     const raw = new Uint8Array(await new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
     let cv = box.querySelector("canvas.fbscreen");
     if (!cv || cv.width !== f.w || cv.height !== f.h) {
-      cv = el("canvas", {class: "fbscreen", title: "Live graphical screen of this machine", style: "display:block;width:100%;max-width:" + f.w + "px;height:auto;border-radius:6px"});
+      cv = el("canvas", {class: "fbscreen", title: "Live graphical screen of this machine", style: "display:block;margin:0 auto;border-radius:6px;background:#000"});
       cv.width = f.w; cv.height = f.h; box.replaceChildren(cv);
     }
+    box.style.overflow = "hidden";                 // the frame is scaled to fit; no scrollbars (text screens reset it)
+    fitFb(cv, box);
     const img = new ImageData(f.w, f.h), d = img.data, bp = f.b >> 3;
     for (let y = 0; y < f.h; y++) {
       let si = y * f.s, di = y * f.w * 4;
@@ -1032,6 +1046,7 @@ async function drawFb(box, f) {
 }
 function drawScreen(box, b64) {
   if (b64 && typeof b64 === "object") { drawFb(box, b64); return; }
+  box.style.overflow = "";
   const b = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const rows = b[0], cols = b[1], cx = b[2], cy = b[3];
   const pre = el("pre", {class: "vscreen", style: `--cols:${cols}`});
@@ -1219,7 +1234,7 @@ async function tabOverview(body, d, m) {
   if (d.tuning) {
     const mins = el("select", {}, ...[5, 10, 30, 60].map(n => el("option", {value: String(n), text: `${n} min`, selected: n === 10})));
     left.append(el("div", {class: "card"}, el("div", {class: "row", style: "margin-bottom:8px"}, el("h2", {style: "margin:0;flex:1", text: "Tuning tips"}),
-        can("operator") && st === "ready" ? el("span", {class: "row", style: "gap:6px"}, mins, el("button", {class: "btn sm", text: "Stress test", title: "CPU + memory under full load in the RAM OS (no disk touched): memory errors, peak temperature, throttling", onclick: async () => {
+        can("operator") && machineState(m).k === "ready" ? el("span", {class: "row", style: "gap:6px"}, mins, el("button", {class: "btn sm", text: "Stress test", title: "CPU + memory under full load in the RAM OS (no disk touched): memory errors, peak temperature, throttling", onclick: async () => {
           try { await api("/api/action", {mac: s.mac, action: "job", type: "stress", minutes: mins.value}); toast("Stress test started - follow it on the Overview tab", "ok"); } catch (e) { toast(e.message, "bad"); } }})) : null),
       d.tuning.length ? el("div", {}, ...d.tuning.map(t => el("div", {style: "margin-bottom:7px"},
           el("div", {class: t.level === "warn" ? "warnc" : "", style: "font-size:13px", text: (t.level === "warn" ? "⚠ " : "• ") + t.msg}),
