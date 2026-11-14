@@ -99,10 +99,12 @@ UPGRADE=0; [ -f "$T/data/kwickboot.db" ] && UPGRADE=1
 if [ "$UPGRADE" = 1 ]; then say "Upgrading $T (data kept)"; systemctl stop pxe-toolkit 2>/dev/null || true; else say "Installing to $T"; fi
 mkdir -p "$T"
 for f in "$SRC"/*.py "$SRC"/README.md "$SRC"/LICENSE "$SRC"/VERSION; do [ -f "$f" ] && install -m 0644 "$f" "$T/"; done
-rm -rf "$T/ui" "$T/linux" "$T/http/scripts" "$T/http/recipes" "$T/http/tools" "$T/http/kbcore"
+rm -rf "$T/ui" "$T/linux" "$T/http/scripts" "$T/http/recipes" "$T/http/tools" "$T/http/kbcore" "$T/http/http"
 cp -r "$SRC/ui" "$SRC/linux" "$T/"
 mkdir -p "$T/http" "$T/tftp"
-for d in scripts recipes tools windows kbcore; do [ -d "$SRC/http/$d" ] && cp -r "$SRC/http/$d" "$T/http/"; done
+# http/http = UEFI HTTP Boot loaders; kbcore-<arch> = the arm64 / i386 / ... RAM OS Cores of a full (mixed-arch) release
+for d in scripts recipes tools windows kbcore http; do [ -d "$SRC/http/$d" ] && cp -r "$SRC/http/$d" "$T/http/"; done
+for c in "$SRC"/http/kbcore-*; do [ -d "$c" ] && { rm -rf "$T/http/${c##*/}"; cp -r "$c" "$T/http/"; }; done
 # the OS library's built-in tools (Rescue & Wipe): replaced on every upgrade, the site's own images are never touched
 if [ -d "$SRC/http/images/tools" ]; then mkdir -p "$T/http/images/tools"
   for t in "$SRC/http/images/tools"/*; do [ -d "$t" ] && { rm -rf "$T/http/images/tools/${t##*/}"; cp -r "$t" "$T/http/images/tools/"; }; done; fi

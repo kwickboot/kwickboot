@@ -24,7 +24,8 @@ for f in *.py README.md LICENSE; do [ -f "$f" ] && cp "$f" "$D/"; done
 mkdir -p "$D/ui"; cp ui/index.html "$D/ui/"; cp -r ui/vendor "$D/ui/"; [ -d ui/i18n ] && cp -r ui/i18n "$D/ui/"   # + translations
 cp -r linux "$D/"
 mkdir -p "$D/http" "$D/tftp" "$D/tftp/alpine"
-for d in scripts recipes tools windows kbcore; do [ -d "http/$d" ] && cp -r "http/$d" "$D/http/"; done
+# http/http = the UEFI HTTP Boot loaders (grubnetx64 / grubaa64 / grubia32) - not in git, staged on the build tree
+for d in scripts recipes tools windows kbcore http; do [ -d "http/$d" ] && cp -r "http/$d" "$D/http/"; done
 
 # Most installations serve x86-64 PCs and use the browser console from an admin workstation. Shipping every CPU
 # architecture and the optional local RICH WebKit desktop made the normal server download ~787 MB. Compact is the
@@ -76,6 +77,16 @@ miss=""; for ep in pxeserver.py webui.py kbctl.py; do [ -f "$D/$ep" ] || continu
   for m in $(grep -hoE '^(import|from) [a-z_][a-z0-9_]+' "$D/$ep" | awk '{print $2}' | sort -u); do
     [ -f "$TREE/$m.py" ] && [ ! -f "$D/$m.py" ] && miss="$miss $m"; done; done
 [ -z "$miss" ] || { echo "FATAL: entrypoint imports present in tree but not packed:$miss"; exit 1; }
+# the network-boot loaders: without them the server answers PXE but no PC can boot (2026.11.11 shipped like that - the
+# build tree had none and the copy loops above skip what is missing). They are not in git: stage them first
+# (linux/fetch-boot-loaders.py <tree> for the signed GRUBs + iPXE; the Microsoft-signed shims bootnet*.efi from shim-signed).
+need="tftp/ipxe/undionly.kpxe tftp/ipxe/ipxe.efi tftp/debian-installer/amd64/bootnetx64.efi tftp/debian-installer/amd64/grubx64.efi http/http/grubnetx64.efi"
+for a in $EXTRA_ARCHES; do case $a in
+  arm64) need="$need tftp/debian-installer/arm64/bootnetaa64.efi tftp/debian-installer/arm64/grubaa64.efi http/http/grubaa64.efi" ;;
+  i386)  need="$need tftp/debian-installer/i386/bootnetia32.efi tftp/debian-installer/i386/grubia32.efi http/http/grubia32.efi" ;;
+esac; done
+lmiss=""; for f in $need; do [ -s "$D/$f" ] || lmiss="$lmiss $f"; done
+[ -z "$lmiss" ] || { echo "FATAL: network-boot loaders missing from the bundle:$lmiss - stage them on the build tree; not packing"; exit 1; }
 # nothing site-specific may ship: fail the build on our own hostnames, user names or home paths
 if grep -rIlE --exclude=make-release.sh 'REPLACE_WITH_PRIVATE_BUILD_HOST|REPLACE_WITH_PRIVATE_PRODUCTION_HOST|C:.Users' "$D" ; then echo "site-specific text found (above) - not packed"; exit 1; fi
 echo "$VER" > "$D/VERSION"

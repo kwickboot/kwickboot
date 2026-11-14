@@ -72,3 +72,21 @@ linux/windows/*.regtrans-ms
 *.swp
 .DS_Store
 
+# network-boot loaders staged on the build tree (not source): Debian-signed shims + GRUBs + their modules and iPXE come from
+# linux/fetch-boot-loaders.py <tree> (archive-verified); the d-i installer kernel/initrd + pxelinux set from Debian's netboot.
+# make-release.sh refuses to pack without them. Kept in git: the grub.cfg.tmpl per arch and http/http (our HTTP-boot GRUBs).
+tftp/debian-installer/*/*.efi
+tftp/debian-installer/*/grub/*/
+tftp/debian-installer/*/grub/font.pf2
+tftp/debian-installer/*/grub/grub.cfg
+tftp/debian-installer/LOADERS.txt
+tftp/debian-installer/amd64/boot-screens/
+tftp/debian-installer/amd64/linux
+tftp/debian-installer/amd64/initrd*.gz
+tftp/debian-installer/amd64/pxelinux.0
+tftp/debian-installer/amd64/pxelinux.cfg/
+tftp/pxelinux.0
+tftp/ldlinux.c32
+tftp/pxelinux.cfg/
+tftp/splash.png
+tftp/version.info

@@ -3,7 +3,10 @@
 SPDX-License-Identifier: AGPL-3.0-or-later
 
 For each UEFI arch (x64, ARM64, IA32) stages, from the Debian archive:
-  <out>/tftp/debian-installer/<arch>/grub<sfx>.efi        signed network GRUB (grub-efi-<arch>-signed: grubnet<sfx>.efi.signed)
+  <out>/tftp/debian-installer/<arch>/grub<sfx>.efi        signed network GRUB (grub-efi-<arch>-signed: grubnet<sfx>-installer.efi.signed,
+                                                          the one Debian's netboot uses: prefix /debian-installer/<arch>/grub - the plain
+                                                          grubnet<sfx>.efi.signed looks in /grub and never finds KwickBoot's grub.cfg)
+  <out>/tftp/debian-installer/<arch>/bootnet<sfx>.efi     Microsoft-signed shim (shim-signed; IA32 from bookworm - trixie has no i386 shim)
   <out>/tftp/debian-installer/<arch>/grub/<platform>/     its modules + .lst files (grub-efi-<arch>-bin, SAME version)
   <out>/http/http/grub<sfx>.efi                           the same GRUB for UEFI HTTP Boot (not x64: own image, build-http-grub.sh)
   <out>/LOADERS.txt                                       versions + sha256 of everything staged
@@ -104,7 +107,7 @@ def main():
         with tempfile.TemporaryDirectory() as x:
             h1 = fetch_deb(signed, x)
             h2 = fetch_deb(binp, x)
-            src = os.path.join(x, "usr/lib/grub", plat + "-signed", f"grubnet{sfx}.efi.signed")
+            src = os.path.join(x, "usr/lib/grub", plat + "-signed", f"grubnet{sfx}-installer.efi.signed")   # prefix /debian-installer/<arch>/grub (plain grubnet = /grub)
             if not os.path.isfile(src):
                 sys.exit(f"{signed['Package']}: {src} missing")
             d = os.path.join(out, "tftp/debian-installer", kdir)
@@ -119,9 +122,27 @@ def main():
                 os.makedirs(os.path.join(out, "http/http"), exist_ok=True)
                 shutil.copy2(src, os.path.join(out, "http/http", f"grub{sfx}.efi"))
             sha = hashlib.sha256(open(src, "rb").read()).hexdigest()
+        # the Microsoft-signed shim (shim-signed: shim<sfx>.efi.signed) = the first-stage loader PCs get: bootnet<sfx>.efi
+        shim = newest(pkgs, "shim-signed")
+        if not shim and debarch == "i386":          # Debian 13 dropped i386 shim-signed; bookworm's (shim 16.x) is the current one
+            old = {}
+            for host, s in MIRRORS:
+                for k, v in packages_index(host, s.format(s="bookworm"), debarch).items():
+                    old.setdefault(k, []).extend(v)
+            shim = newest(old, "shim-signed")
+        if not shim:
+            sys.exit(f"{suite}/{debarch}: no shim-signed package")
+        with tempfile.TemporaryDirectory() as x:
+            h3 = fetch_deb(shim, x)
+            ssrc = os.path.join(x, "usr/lib/shim", f"shim{sfx}.efi.signed")
+            if not os.path.isfile(ssrc):
+                sys.exit(f"{shim['Package']}: {ssrc} missing")
+            shutil.copy2(ssrc, os.path.join(out, "tftp/debian-installer", kdir, f"bootnet{sfx}.efi"))
+            ssha = hashlib.sha256(open(ssrc, "rb").read()).hexdigest()
+        report.append(f"{kdir}: {shim['Package']} {shim['Version']} ({shim['_suite']}, deb sha256 {h3[:16]}); bootnet{sfx}.efi sha256 {ssha}")
         report.append(f"{kdir}: {signed['Package']} {signed['Version']} ({signed['_suite']}, deb sha256 {h1[:16]}) + "
                       f"{binp['Package']} {binp['Version']} ({n} modules, deb sha256 {h2[:16]}); grub{sfx}.efi sha256 {sha}")
-        print(report[-1])
+        print(report[-2]); print(report[-1])
         if debarch == "amd64":
             amd64_pkgs = pkgs
     # iPXE (Debian "ipxe", arch all): the legacy-BIOS loaders - undionly.kpxe (default: drives the NIC through its PXE ROM's

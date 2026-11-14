@@ -1,0 +1,38 @@
+# KwickBoot ARM64 boot menu (rendered from grub.cfg.tmpl at server start) - mirrors the amd64 menu with aarch64 paths.
+# Chain: firmware PXE/HTTP -> signed shim bootnetaa64.efi -> grubaa64.efi -> this config -> per-machine action over HTTP.
+set timeout=8
+set default=1
+insmod all_video
+insmod part_gpt
+insmod fat
+insmod chain
+insmod http
+
+# The server decides the action per machine and returns a generated config (arch=arm64 so it serves aarch64 kernels).
+if [ -n "$net_default_mac" ]; then
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg?arch=arm64
+    sleep 2
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg?arch=arm64
+fi
+
+menuentry 'Load KwickBoot to RAM - inspect / rescue / install remotely  (does NOT touch disks)' {
+    configfile (http,{{SERVER_IP}}:{{HTTP_PORT}})/grub/${net_default_mac}.cfg?arch=arm64&force=alpine
+}
+
+menuentry 'Start the installed system (local disk)' {
+    insmod ext2
+    insmod btrfs
+    insmod xfs
+    if search --no-floppy --file --set=diskroot /boot/grub/grub.cfg; then
+        set root=$diskroot
+        set prefix=($diskroot)/boot/grub
+        configfile /boot/grub/grub.cfg
+    fi
+    if search --no-floppy --file --set=diskroot /grub/grub.cfg; then
+        set root=$diskroot
+        set prefix=($diskroot)/grub
+        configfile /grub/grub.cfg
+    fi
+    echo "KwickBoot: handing over to the firmware - next boot entry (local disk)"
+    exit 1
+}
