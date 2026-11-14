@@ -1173,7 +1173,61 @@ def parse_options(data):
     return opts
 
 
-def build_reply(req, opts, msg_type, boot_file, http=False):
+# proxyDHCP OFFER layouts - firmware differs in which one it accepts (HP EliteDesk 800 G3 UEFI only takes "binl"):
+#   menu   = PXE boot-server discovery menu in opt 43 (the long-standing default; EDK2 / Hyper-V / QEMU take it)
+#   binl   = WDS-like: PXEClient only, no file - the PC asks port 4011 and gets the file in the ACK
+#   bare   = no opt 43, boot file in the offer        direct = opt 43 discovery-control 0x08 + boot file in the offe
+OFFER_STYLES = ("menu", "binl", "bare", "direct")
+_STYLE_TRY = {}          # mac -> (xid, index into OFFER_STYLES) for the DHCP exchange in progress
+_STYLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "offer_styles.json")
+_STYLE_LOCK = threading.Lock()
+
+
+def _learned_styles():
+    try:
+        with open(_STYLE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _learn_style(mac, style):
+    with _STYLE_LOCK:
+        os.makedirs(os.path.dirname(_STYLE_FILE), exist_ok=True)
+        d = _learned_styles()
+        if d.get(mac) == style:
+            return
+        d[mac] = style
+        tmp = _STYLE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=1, sort_keys=True)
+        os.replace(tmp, _STYLE_FILE)
+    log(f"[dhcp] {mac}: firmware accepts offer style '{style}' - remembered")
+
+
+def offer_style(mac, xid):
+    """Layout of the proxyDHCP OFFER for this PC (see OFFER_STYLES). A re-sent DISCOVER (same xid) means the firmware
+    turned down every offer it got, so it gets the next layout; the one it finally REQUESTs on is remembered."""
+    forced = (CFG.get("pxe_offer_test") or {}).get(mac)
+    if forced and forced in OFFER_STYLES:
+        _STYLE_TRY[mac] = (xid, OFFER_STYLES.index(forced))
+        return forced
+    learned = _learned_styles().get(mac) or CFG.get("pxe_offer_style", "menu")
+    start = OFFER_STYLES.index(learned) if learned in OFFER_STYLES else 0
+    prev = _STYLE_TRY.get(mac)
+    i = (prev[1] + 1) % len(OFFER_STYLES) if prev and prev[0] == xid else start
+    _STYLE_TRY[mac] = (xid, i)
+    return OFFER_STYLES[i]
+
+
+def offer_style_accepted(mac, xid):
+    """The PC sent its DHCP REQUEST: it took the offers of this exchange -> remember the layout it last got."""
+    prev = _STYLE_TRY.get(mac)
+    if prev and prev[0] == xid:
+        _learn_style(mac, OFFER_STYLES[prev[1]])
+
+
+def build_reply(req, opts, msg_type, boot_file, http=False, style="menu"):
     pkt = bytearray(240)
     pkt[0], pkt[1], pkt[2] = 2, 1, 6
     pkt[4:8] = req[4:8]
@@ -1181,9 +1235,11 @@ def build_reply(req, opts, msg_type, boot_file, http=False):
     pkt[20:24] = socket.inet_aton(MY_IP)
     pkt[28:44] = req[28:44]
     sname = b"" if http else MY_IP.encode()    # HTTP Boot: the boot file is an absolute URL, no TFTP server name
-    pkt[44:44 + len(sname)] = sname
     fb = boot_file.encode()
-    pkt[108:108 + len(fb)] = fb
+    binl = (msg_type == 2 and style == "binl" and not http)   # WDS-like offer: no server name / file, PC asks 4011
+    if not binl:
+        pkt[44:44 + len(sname)] = sname
+        pkt[108:108 + len(fb)] = fb
     pkt[236:240] = b"\x63\x82\x53\x63"
     o = bytearray([53, 1, msg_type]) + bytes([54, 4]) + socket.inet_aton(MY_IP)
     if http:   # UEFI HTTP Boot: firmware accepts a proxy offer whose vendor-class is "HTTPClient"; the URL is in the file field + opt 67
@@ -1195,6 +1251,16 @@ def build_reply(req, opts, msg_type, boot_file, http=False):
     o += bytes([60, 9]) + b"PXEClient"
     if 97 in opts:
         o += bytes([97, len(opts[97])]) + opts[97]
+    if binl:
+        return bytes(pkt) + bytes(o) + bytes([255])
+    if msg_type == 2 and style == "bare":
+        o += bytes([66, len(sname)]) + sname + bytes([67, len(fb)]) + fb + bytes([255])
+        return bytes(pkt) + bytes(o)
+    if msg_type == 2 and style == "direct":
+        vend = bytes([6, 1, 0x08, 255])
+        o += bytes([43, len(vend)]) + vend
+        o += bytes([66, len(sname)]) + sname + bytes([67, len(fb)]) + fb + bytes([255])
+        return bytes(pkt) + bytes(o)
     if msg_type == 2:
         desc = b"PXE toolkit"
         vend = bytearray([6, 1, 0x07])
@@ -1510,11 +1576,15 @@ def handle_dhcp(sock, data, addr, port):
     is_ipxe = opts.get(77, b"") == b"iPXE"
     boot = boot_file_for(mac, arch, is_ipxe, is_http)
     if mtype == 1:
-        reply = build_reply(data, opts, 2, boot, is_http)
+        style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]))
+        reply = build_reply(data, opts, 2, boot, is_http, style)
         for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
             sock.sendto(reply, (dst, 68))
-        log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}")
+        log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}"
+            + (f" style={style}" if style != "menu" else ""))
         boot_step(mac, "dhcp", ("HTTP" if is_http else "iPXE" if is_ipxe else "UEFI" if arch in (6, 7, 9, 10, 11) else "BIOS"))
+    elif mtype == 3 and port == 67 and not (is_http or is_ipxe or is_uboot):
+        offer_style_accepted(mac, bytes(data[4:8]))      # the PC's DHCP REQUEST (to whichever DHCP server it chose)
     elif mtype == 3 and port == 4011:
         sock.sendto(build_reply(data, opts, 5, boot, is_http), addr)
         log(f"[dhcp:{port}] ACK {mac} file={boot}")
