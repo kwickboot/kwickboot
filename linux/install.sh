@@ -15,6 +15,8 @@
 #                lab / network without DHCP). Never where another DHCP server runs.
 #     --own-dhcp-discover  with --own-dhcp: every PC that network-boots there is registered (test lab)
 #     --console-from <cidr>  console + SSH also from this network (e.g. the office side of a test lab); repeatable
+#     --pxe-from <cidr>  with --firewall: PCs on this network also network-boot (other VLANs reaching KwickBoot through
+#                a DHCP relay / ip helper-address on the router - TFTP, HTTP boot and managed machines); repeatable
 #     --no-net-tune  leave the kernel / network card settings alone (default: tuned for large transfers)
 # Upgrades in place: code, console and boot files are replaced; the database, machines, logs, config, images and
 # ISOs are kept. Ports: UDP 67/4011 proxyDHCP, UDP 69 TFTP, TCP 8080 console+HTTP boot, TCP 8444 managed machines,
@@ -22,12 +24,13 @@
 set -eu
 T=/opt/pxe-toolkit
 SRC=$(cd "$(dirname "$0")" && pwd)
-IFACE=""; FW=0; CACHE=1; AISDK=0; YES=0; OFFLINE=0; NETTUNE=1; OWNDHCP=""; ALSO=""; ODISC=false   # CACHE on by default (offline-ready sites)
+IFACE=""; FW=0; CACHE=1; AISDK=0; YES=0; OFFLINE=0; NETTUNE=1; OWNDHCP=""; ALSO=""; PXEFROM=""; ODISC=false   # CACHE on by default (offline-ready sites)
 while [ $# -gt 0 ]; do
   case "$1" in
     --iface) IFACE=$2; shift ;; --firewall) FW=1 ;; --cache) CACHE=1 ;; --no-cache) CACHE=0 ;; --ai-sdk) AISDK=1 ;; --yes|-y) YES=1 ;; --offline) OFFLINE=1 ;; --no-net-tune) NETTUNE=0 ;;
     --own-dhcp) OWNDHCP=$2; shift ;; --own-dhcp-discover) ODISC=true ;; --console-from) ALSO="$ALSO $2"; shift ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --pxe-from) PXEFROM="$PXEFROM $2"; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option $1 (see --help)"; exit 1 ;;
   esac; shift
 done
@@ -53,6 +56,7 @@ LAN=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]
 ADDR=${IP%/*}
 say "Server $ADDR on $IFACE (LAN $LAN)"
 for c in $ALSO; do python3 -c "import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)" "$c" 2>/dev/null || die "--console-from: $c is not a network (e.g. 192.168.0.0/24)"; done
+for c in $PXEFROM; do python3 -c "import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)" "$c" 2>/dev/null || die "--pxe-from: $c is not a network (e.g. 10.20.0.0/16)"; done
 if [ -n "$OWNDHCP" ]; then
   python3 - "$OWNDHCP" "$IP" <<'PY' || die "--own-dhcp: give <first>-<last> inside the server's network, e.g. 10.88.0.100-10.88.0.200"
 import ipaddress, sys
@@ -182,6 +186,11 @@ if [ "$FW" = 1 ]; then
     ip saddr $LAN tcp dport { 8080, 8444, 9443 } accept comment \"KwickBoot boot files, managed machines, HTTPS console\"
     ip saddr $LAN udp dport 9000-9199 accept comment \"KwickBoot multicast\"
     ip saddr $LAN tcp dport 3142 accept comment \"KwickBoot package cache\""
+  for c in $PXEFROM; do   # other VLANs network-booting through a DHCP relay (the relayed DHCP itself arrives on 67/4011 above)
+    RULES="$RULES
+    ip saddr $c udp dport 69 accept comment \"KwickBoot TFTP for $c (DHCP relay)\"
+    ip saddr $c tcp dport { 8080, 8444 } accept comment \"KwickBoot boot files + managed machines for $c (DHCP relay)\""
+  done
   if [ "$FWPRINT" = 1 ]; then echo "$RULES"; else
     cp -a /etc/nftables.conf /etc/nftables.conf.before-kwickboot 2>/dev/null || true
     cat > /etc/nftables.conf <<EOF

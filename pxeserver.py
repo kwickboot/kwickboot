@@ -900,9 +900,23 @@ def job_watchdog():
         _watch.pop(k, None)
 
 
+AGENT_SRC = {}      # mac -> the address its RAM OS agent really connected from (seen by us, not self-reported)
+
+
+def firstboot_probe_ok(mac, ip):
+    """May the first-boot check connect to ip? The agent reports its own address, so only probe the server's real subnet,
+    or the exact address that PC's agent connected from (a PC on another VLAN, booted through a DHCP relay)."""
+    import ipaddress
+    try:
+        if ipaddress.ip_address(ip) in local_network():
+            return True
+    except ValueError:
+        return False
+    return AGENT_SRC.get(mac) == ip
+
+
 def firstboot_loop():
     import socket as _s
-    net = MY_IP.rsplit(".", 1)[0] + "."
     while True:
         time.sleep(10)
         try:
@@ -932,7 +946,7 @@ def firstboot_loop():
                 # machine was handed to its disk, or the RAM OS said "rebooting" more than 45 s ago
                 gone = fb["state"] == "handed" or (m.get("agent_state") == "rebooting" and time.time() - (m.get("agent_seen") or 0) > 45)
                 ip = m.get("agent_ip") or ""
-                if not gone or not ip.startswith(net):
+                if not gone or not firstboot_probe_ok(m["mac"], ip):
                     continue
                 port = int(fb["check"][4:])
                 try:
@@ -1817,6 +1831,21 @@ def local_broadcast():
                 pass
         _BCAST.append(b)
     return _BCAST[0]
+
+
+def local_network():
+    """This server's real LAN (address + SIOCGIFNETMASK of its card); a /24 if the mask can't be read."""
+    import ipaddress
+    mask = "255.255.255.0"
+    if IS_LINUX and IFACE:
+        try:
+            import fcntl
+            s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            mask = socket.inet_ntoa(fcntl.ioctl(s_.fileno(), 0x891B, struct.pack("256s", IFACE.encode()[:15]))[20:24])
+            s_.close()
+        except OSError:
+            pass
+    return ipaddress.ip_network(f"{MY_IP}/{mask}", strict=False)
 
 
 def send_offer(sock, req, reply):
@@ -2821,6 +2850,7 @@ class Handler(SimpleHTTPRequestHandler):
         elif u.path == "/agent/hello":
             st = q.get("state", ["?"])[0][:20]
             ip = q.get("ip", [self.client_address[0]])[0][:45]
+            AGENT_SRC[mac] = self.client_address[0]
             msg = body.decode(errors="replace")[:200]
             mrow = db.machine(mac) or {}
             prev = mrow.get("agent_state")
