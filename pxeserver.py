@@ -953,7 +953,7 @@ def wake(mac):
     if IS_LINUX and IFACE:
         s.setsockopt(_s.SOL_SOCKET, 25, (IFACE + "\0").encode())      # SO_BINDTODEVICE: the LAN port only
     try:
-        for dst in (MY_IP.rsplit(".", 1)[0] + ".255", "255.255.255.255"):
+        for dst in (local_broadcast(), "255.255.255.255"):
             s.sendto(pkt, (dst, 9))
     finally:
         s.close()
@@ -1325,6 +1325,7 @@ def build_reply(req, opts, msg_type, boot_file, http=False, style="menu"):
     pkt[4:8] = req[4:8]
     pkt[10:12] = req[10:12]
     pkt[20:24] = socket.inet_aton(MY_IP)
+    pkt[24:28] = req[24:28]                    # giaddr: a DHCP relay (ip helper-address) forwarded this - it delivers our reply
     pkt[28:44] = req[28:44]
     sname = b"" if http else MY_IP.encode()    # HTTP Boot: the boot file is an absolute URL, no TFTP server name
     fb = boot_file.encode()
@@ -1696,20 +1697,16 @@ def handle_dhcp(sock, data, addr, port):
                       f"(it falls through to its SD card / USB)", every=600)
             return
         if mtype == 1:
-            reply = build_reply(data, opts, 2, "", False, "rpi")
-            for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
-                sock.sendto(reply, (dst, 68))
-            log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) Raspberry Pi -> tftp {pi_root()}/ style=rpi")
+            via = send_offer(sock, data, build_reply(data, opts, 2, "", False, "rpi"))
+            log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) Raspberry Pi -> tftp {pi_root()}/ style=rpi{via}")
             boot_step(mac, "dhcp", "Raspberry Pi")
         return
     feats = ipxe_features(opts) if is_ipxe else {}
     boot = boot_file_for(mac, arch, is_ipxe, is_http, ipxe_http=(not feats) or (19 in feats))
     if mtype == 1:
         style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]), arch)
-        reply = build_reply(data, opts, 2, boot, is_http, style)
-        for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
-            sock.sendto(reply, (dst, 68))
-        log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}"
+        via = send_offer(sock, data, build_reply(data, opts, 2, boot, is_http, style))
+        log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}{via}"
             + (" (iPXE without HTTP: chain to ours)" if is_ipxe and not boot.startswith("http") else "")
             + ("" if (is_http or is_ipxe or is_uboot) else f" style={style}"))
         boot_step(mac, "dhcp", ("HTTP" if is_http else "iPXE" if is_ipxe else "UEFI" if arch in (6, 7, 9, 10, 11) else "BIOS"))
@@ -1744,6 +1741,37 @@ def dhcp_loop(port):
             handle_dhcp(s, data, addr, port)
         except Exception as e:
             log(f"[dhcp:{port}] error {e!r}")
+
+
+_BCAST = []
+
+
+def local_broadcast():
+    """This server's real subnet broadcast address (SIOCGIFBRDADDR on its card); x.y.z.255 if it can't be read."""
+    if not _BCAST:
+        b = MY_IP.rsplit(".", 1)[0] + ".255"
+        if IS_LINUX and IFACE:
+            try:
+                import fcntl
+                s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                b = socket.inet_ntoa(fcntl.ioctl(s_.fileno(), 0x8919, struct.pack("256s", IFACE.encode()[:15]))[20:24])
+                s_.close()
+            except OSError:
+                pass
+        _BCAST.append(b)
+    return _BCAST[0]
+
+
+def send_offer(sock, req, reply):
+    """Send a proxyDHCP OFFER. Relayed request (giaddr set: the PC is on another VLAN/subnet, a router's ip helper-address
+    forwarded it) -> back to the relay agent's port 67, which delivers it there. Local request -> limited + subnet broadcast."""
+    giaddr = req[24:28]
+    if giaddr != b"\0\0\0\0":
+        sock.sendto(reply, (socket.inet_ntoa(giaddr), 67))
+        return f" via relay {socket.inet_ntoa(giaddr)}"
+    for dst in ("255.255.255.255", local_broadcast()):
+        sock.sendto(reply, (dst, 68))
+    return ""
 
 
 # ---------------------------------------------------------------- watch other DHCP servers (read-only)
