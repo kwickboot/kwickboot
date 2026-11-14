@@ -1197,15 +1197,54 @@ def ipxe_features(opts):
 # "Raspberry Pi Boot" in the opt 43 menu and then TFTPs <serial>/start4.elf (Pi 4/5) or bootcode.bin (Pi 3).
 # Recognised by the Raspberry Pi Foundation / Trading MAC prefixes.
 PI_OUIS = ("b8:27:eb", "dc:a6:32", "e4:5f:01", "d8:3a:dd", "2c:cf:67", "28:cd:c1")
-PI_DIR = os.path.join(TFTP_ROOT, "rpi")      # the operator's Pi boot files (firmware, config.txt, kernel ...)
+PI_DIR = os.path.join(TFTP_ROOT, "rpi")      # an operator's own Pi boot tree (optional)
 
 
 def is_raspberry_pi(mac):
     return mac[:8] in PI_OUIS
 
 
+def pi_root():
+    """Where the Pi boot tree is: tftp/rpi/ if an operator put one there, else the TFTP root, where linux/build-pi-boot.sh
+    stages KwickBoot's (Pi firmware + arm64 Core + device trees + config.txt/cmdline.txt). None if neither has one."""
+    for d in (PI_DIR, TFTP_ROOT):
+        if any(os.path.isfile(os.path.join(d, f)) for f in ("start4.elf", "start.elf", "bootcode.bin")):
+            return d
+    return None
+
+
 def pi_files_present():
-    return any(os.path.isfile(os.path.join(PI_DIR, f)) for f in ("start4.elf", "start.elf", "bootcode.bin"))
+    return pi_root() is not None
+
+
+def mac_for_ip(ip):
+    """MAC of a LAN client that has no MAC in its request (TFTP): learned from its boot, else the kernel's ARP table -
+    filled by the time a Pi asks for cmdline.txt (we already sent it config.txt and start4.elf)."""
+    if ip in IP2MAC:
+        return IP2MAC[ip]
+    try:
+        for line in open("/proc/net/arp").read().splitlines()[1:]:
+            f = line.split()
+            if len(f) >= 4 and f[0] == ip and f[3] != "00:00:00:00:00:00":
+                return norm_mac(f[3])
+    except OSError:
+        pass
+    return ""
+
+
+def pi_cmdline(mac):
+    """The Pi's kernel command line: the staged cmdline.txt (rendered from cmdline.txt.tmpl at start) + this boot's agent
+    token, so the arm64 Core's agent is accepted like any machine's. An operator's own cmdline (no kb_server=) is untouched."""
+    root = pi_root() or TFTP_ROOT
+    try:
+        base = open(os.path.join(root, "cmdline.txt")).read().strip()
+    except OSError:
+        base = f"console=serial0,115200 console=tty1 ip=dhcp kb_server={MY_IP}:{HTTP_PORT} loglevel=4"
+    if mac and "kb_server=" in base and "pxetoken=" not in base:
+        base += f" pxetoken={issue_token(mac)}"
+        if (machine(mac) or {}).get("kb_shell"):
+            base += " kb_shell=1"
+    return base + "\n"
 
 
 _NOTED = {}
@@ -1649,14 +1688,18 @@ def handle_dhcp(sock, data, addr, port):
     is_ipxe = opts.get(77, b"") == b"iPXE"
     if arch == 0 and not (is_ipxe or is_http or is_uboot) and is_raspberry_pi(mac):
         if not pi_files_present():
-            note_once(("pi", mac), f"[dhcp:{port}] Raspberry Pi {mac} wants to network-boot - put its boot files "
-                      f"(start4.elf / bootcode.bin, config.txt, kernel) in {PI_DIR}/ to serve it; not answered")
+            note_once(("pi", mac), f"[dhcp:{port}] Raspberry Pi {mac} wants to network-boot - no Pi boot tree on this server: "
+                      f"run linux/build-pi-boot.sh (KwickBoot's arm64 Core for Pi 3/4/5) or put your own in {PI_DIR}/; not answered")
+            return
+        if current_action(mac, consume=False) == "local":   # silence = the Pi moves on to its next BOOT_ORDER entry (SD / USB)
+            note_once(("pi-local", mac), f"[dhcp:{port}] Raspberry Pi {mac} is set to boot locally - not answered "
+                      f"(it falls through to its SD card / USB)", every=600)
             return
         if mtype == 1:
             reply = build_reply(data, opts, 2, "", False, "rpi")
             for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
                 sock.sendto(reply, (dst, 68))
-            log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) Raspberry Pi -> tftp {PI_DIR}/ style=rpi")
+            log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) Raspberry Pi -> tftp {pi_root()}/ style=rpi")
             boot_step(mac, "dhcp", "Raspberry Pi")
         return
     feats = ipxe_features(opts) if is_ipxe else {}
@@ -1935,9 +1978,12 @@ def tftp_resolve(fname):
     if os.path.isfile(full):
         return full
     cands = [fname]
+    parts = fname.split("/", 1)
+    serial = len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{8}", parts[0])
     if os.path.isdir(PI_DIR):
-        parts = fname.split("/", 1)
-        cands += ["rpi/" + fname] + (["rpi/" + parts[1]] if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{8}", parts[0]) else [])
+        cands += ["rpi/" + fname] + (["rpi/" + parts[1]] if serial else [])
+    if serial:                              # Pi 4/5 ask <serial>/start4.elf first: the shared tree at the TFTP root
+        cands.append(parts[1])
     for c in cands:
         hit = _ci_path(TFTP_ROOT, c)
         if hit and os.path.isfile(hit):
@@ -1971,6 +2017,20 @@ def tftp_loop():
                 continue
             IP2MAC[client[0]] = mac
             boot_step(mac, "menu")
+            threading.Thread(target=tftp_send, args=(client, content, fname, opts), daemon=True).start()
+            continue
+        pi_name = fname.split("/", 1)[1] if re.fullmatch(r"[0-9a-fA-F]{8}/cmdline\.txt", fname) else fname
+        if pi_name == "cmdline.txt" and pi_files_present():  # a Raspberry Pi: its own command line with this boot's token
+            key = (client[0], fname)
+            mac = mac_for_ip(client[0])
+            if key in cache and time.time() - cache[key][0] < 30:
+                content = cache[key][1]
+            else:
+                content = pi_cmdline(mac if mac and known_or_discover(mac) else "").encode()
+                cache[key] = (time.time(), content)
+            if mac:
+                IP2MAC[client[0]] = mac
+                boot_step(mac, "menu", "Raspberry Pi cmdline")
             threading.Thread(target=tftp_send, args=(client, content, fname, opts), daemon=True).start()
             continue
         if fname.startswith("pxelinux.cfg/"):      # U-Boot ARM SBC distro/pxe boot: generate the extlinux.conf on the fly
