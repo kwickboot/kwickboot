@@ -1173,10 +1173,56 @@ def parse_options(data):
     return opts
 
 
+def client_arch(opts):
+    """Client system architecture: opt 93, else the "Arch:NNNNN" in the vendor class (some ROMs send only that)."""
+    if len(opts.get(93, b"")) >= 2:
+        return struct.unpack("!H", opts[93][:2])[0]
+    m = re.search(rb"Arch:(\d{5})", opts.get(60, b""))
+    return int(m.group(1)) if m else 0
+
+
+def ipxe_features(opts):
+    """iPXE's encapsulated opt 175: {feature code: value} (19 = HTTP, 20 = HTTPS, 36 = EFI, ...); {} if not sent."""
+    ov, j, f = opts.get(175, b""), 0, {}
+    while j + 1 < len(ov) and ov[j] != 255:
+        if ov[j] == 0:
+            j += 1
+            continue
+        f[ov[j]] = ov[j + 2:j + 2 + ov[j + 1]]
+        j += 2 + ov[j + 1]
+    return f
+
+
+# Raspberry Pi network-boot ROM: "PXEClient:Arch:00000:UNDI:002001" exactly like a BIOS PC, never uses port 4011, wants
+# "Raspberry Pi Boot" in the opt 43 menu and then TFTPs <serial>/start4.elf (Pi 4/5) or bootcode.bin (Pi 3).
+# Recognised by the Raspberry Pi Foundation / Trading MAC prefixes.
+PI_OUIS = ("b8:27:eb", "dc:a6:32", "e4:5f:01", "d8:3a:dd", "2c:cf:67", "28:cd:c1")
+PI_DIR = os.path.join(TFTP_ROOT, "rpi")      # the operator's Pi boot files (firmware, config.txt, kernel ...)
+
+
+def is_raspberry_pi(mac):
+    return mac[:8] in PI_OUIS
+
+
+def pi_files_present():
+    return any(os.path.isfile(os.path.join(PI_DIR, f)) for f in ("start4.elf", "start.elf", "bootcode.bin"))
+
+
+_NOTED = {}
+
+
+def note_once(key, msg, every=3600):
+    """Log a diagnostic at most once per key and period (DHCP retries would otherwise flood the log)."""
+    now_ = time.time()
+    if now_ - _NOTED.get(key, 0) >= every:
+        _NOTED[key] = now_
+        log(msg)
+
+
 # proxyDHCP OFFER layouts - firmware differs in which one it accepts (HP EliteDesk 800 G3 UEFI only takes "binl"):
 #   menu   = PXE boot-server discovery menu in opt 43 (legacy BIOS default; EDK2 / Hyper-V / QEMU take it too)
 #   binl   = WDS-like: PXEClient only, no file - the PC asks port 4011 and gets the file in the ACK
-#   bare   = no opt 43, boot file in the offer        direct = opt 43 discovery-control 0x08 + boot file in the offe
+#   bare   = no opt 43, boot file in the offer        direct = opt 43 discovery-control 0x08 + boot file in the offer
 OFFER_STYLES = ("menu", "binl", "bare", "direct")
 # Order tried per firmware family. UEFI: binl first - the layout dnsmasq sends every EFI client since 2.76 (UEFI PXE
 # menu handling is broken on many PCs: HP, Dell/Intel, ASUS, VMware EFI); EDK2/OVMF takes all four (tested 14 Nov 2026).
@@ -1244,7 +1290,7 @@ def build_reply(req, opts, msg_type, boot_file, http=False, style="menu"):
     sname = b"" if http else MY_IP.encode()    # HTTP Boot: the boot file is an absolute URL, no TFTP server name
     fb = boot_file.encode()
     binl = (msg_type == 2 and style == "binl" and not http)   # WDS-like offer: no server name / file, PC asks 4011
-    if not binl:
+    if not binl and style != "rpi":
         pkt[44:44 + len(sname)] = sname
         pkt[108:108 + len(fb)] = fb
     pkt[236:240] = b"\x63\x82\x53\x63"
@@ -1267,6 +1313,13 @@ def build_reply(req, opts, msg_type, boot_file, http=False, style="menu"):
         vend = bytes([6, 1, 0x08, 255])
         o += bytes([43, len(vend)]) + vend
         o += bytes([66, len(sname)]) + sname + bytes([67, len(fb)]) + fb + bytes([255])
+        return bytes(pkt) + bytes(o)
+    if msg_type == 2 and style == "rpi":    # Pi boot ROM: looks for "Raspberry Pi Boot" in the menu (Pi 3: 3 trailing
+        desc = b"Raspberry Pi Boot   "     # spaces), takes the TFTP server from siaddr, ignores file/4011
+        vend = bytearray([6, 1, 0x03])
+        vend += bytes([9, 3 + len(desc)]) + struct.pack("!HB", 0, len(desc)) + desc
+        vend += bytes([10, 4, 0]) + b"PXE" + bytes([255])
+        o += bytes([43, len(vend)]) + bytes(vend) + bytes([255])
         return bytes(pkt) + bytes(o)
     if msg_type == 2:
         desc = b"PXE toolkit"
@@ -1414,7 +1467,10 @@ def job_tick(mac, jid, text):
     live.publish({"t": "jobtick", "mac": mac, "job": jid, "step": int(steps[-1]) if steps else 0, "line": last})
 
 
-def boot_file_for(mac, arch, is_ipxe, is_http=False):
+_IPXE_CHAINED = {}
+
+
+def boot_file_for(mac, arch, is_ipxe, is_http=False, ipxe_http=True):
     # DHCP option 93 (client system architecture) picks the right network boot program:
     #   7/16 x64 UEFI · 11/19 ARM64 UEFI · 6/9/15 x86 UEFI · 10/18 ARM32 UEFI · 0 legacy BIOS  (the odd one of each pair = HTTP)
     if arch in (11, 19):                    # ARM64 UEFI (aarch64): Debian-signed aa64 shim -> GRUB (Secure Boot compatible)
@@ -1427,6 +1483,11 @@ def boot_file_for(mac, arch, is_ipxe, is_http=False):
         return CFG.get("boot_file_uefi_ia32", "debian-installer/i386/bootnetia32.efi")
     if is_http:   # x64 UEFI HTTP Boot (RFC 5970): the firmware fetches the loader over HTTP, not TFTP. Hand it a full URL.
         return f"http://{MY_IP}:{HTTP_PORT}/" + CFG.get("boot_file_http", "http/grubnetx64.efi")
+    if is_ipxe and not ipxe_http and arch in (0, 7, 9) and time.time() - _IPXE_CHAINED.get(mac, 0) > 120:
+        # an iPXE built without HTTP (some NIC / hypervisor ROMs): load OUR iPXE over TFTP first - it has HTTP and comes
+        # straight back for the script below (at most once per 2 min, so a build that lies can't loop)
+        _IPXE_CHAINED[mac] = time.time()
+        return CFG.get("boot_file_bios", "ipxe/undionly.kpxe") if arch == 0 else "ipxe/ipxe.efi"
     if is_ipxe:   # our iPXE build ignores this and fetches /boot.ipxe itself; harmless for others
         return f"http://{MY_IP}:{HTTP_PORT}/boot.ipxe"
     if arch in (7, 9, 10):                 # x64 UEFI (ARM32 at 10 is unsupported; it gets the x64 NBP, which it ignores)
@@ -1573,21 +1634,40 @@ def handle_dhcp(sock, data, addr, port):
     is_http = vclass.startswith(b"HTTPClient")      # UEFI HTTP Boot client (vs PXEClient = TFTP)
     is_uboot = vclass.startswith(b"U-Boot")         # U-Boot ARM SBC (distro/pxe boot) - fetches pxelinux.cfg/ over TFTP
     if not (vclass.startswith(b"PXEClient") or is_http or is_uboot):
+        for tag, what in ((b"AAPLBSDPC", "Apple NetBoot (BSDP)"), (b"Etherboot", "Etherboot"), (b"gPXE", "gPXE"),
+                          (b"ArmPC", "ARM PC firmware")):
+            if vclass.startswith(tag):
+                note_once(("vclass", mac), f"[dhcp:{port}] {mac} asks to network-boot as {what} "
+                          f"({vclass[:40].decode(errors='replace')}) - not supported, not answered")
         return
     m = known_or_discover(mac)
     if not m:
         log(f"[dhcp:{port}] ignored unknown {mac} (open discovery: pxectl discover 30)")
         return
     mtype = opts.get(53, b"\x00")[0]
-    arch = struct.unpack("!H", opts[93][:2])[0] if 93 in opts and len(opts[93]) >= 2 else 0
+    arch = client_arch(opts)
     is_ipxe = opts.get(77, b"") == b"iPXE"
-    boot = boot_file_for(mac, arch, is_ipxe, is_http)
+    if arch == 0 and not (is_ipxe or is_http or is_uboot) and is_raspberry_pi(mac):
+        if not pi_files_present():
+            note_once(("pi", mac), f"[dhcp:{port}] Raspberry Pi {mac} wants to network-boot - put its boot files "
+                      f"(start4.elf / bootcode.bin, config.txt, kernel) in {PI_DIR}/ to serve it; not answered")
+            return
+        if mtype == 1:
+            reply = build_reply(data, opts, 2, "", False, "rpi")
+            for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
+                sock.sendto(reply, (dst, 68))
+            log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) Raspberry Pi -> tftp {PI_DIR}/ style=rpi")
+            boot_step(mac, "dhcp", "Raspberry Pi")
+        return
+    feats = ipxe_features(opts) if is_ipxe else {}
+    boot = boot_file_for(mac, arch, is_ipxe, is_http, ipxe_http=(not feats) or (19 in feats))
     if mtype == 1:
         style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]), arch)
         reply = build_reply(data, opts, 2, boot, is_http, style)
         for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
             sock.sendto(reply, (dst, 68))
         log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}"
+            + (" (iPXE without HTTP: chain to ours)" if is_ipxe and not boot.startswith("http") else "")
             + ("" if (is_http or is_ipxe or is_uboot) else f" style={style}"))
         boot_step(mac, "dhcp", ("HTTP" if is_http else "iPXE" if is_ipxe else "UEFI" if arch in (6, 7, 9, 10, 11) else "BIOS"))
     elif mtype == 3 and port == 67 and not (is_http or is_ipxe or is_uboot):
@@ -1623,6 +1703,78 @@ def dhcp_loop(port):
             log(f"[dhcp:{port}] error {e!r}")
 
 
+# ---------------------------------------------------------------- watch other DHCP servers (read-only)
+# The site router's / another server's PXE settings silently win over a proxyDHCP on many PCs (opt 66/67 or a boot file,
+# a next-server, opt 60 "PXEClient", WDS/SCCM/dnsmasq answering PXE too). Their replies to clients are sniffed with a
+# kernel BPF filter (AF_PACKET, CAP_NET_RAW - no port is bound, the server's own DHCP client is not disturbed) and every
+# such setting is logged as a warning and kept for the console (setting "dhcp_conflicts").
+_BPF_UDP_67_TO_68 = [   # tcpdump -dd "ip and udp src port 67 and udp dst port 68" (Ethernet)
+    (0x28, 0, 0, 0x0000000c), (0x15, 0, 10, 0x00000800), (0x30, 0, 0, 0x00000017), (0x15, 0, 8, 0x00000011),
+    (0x28, 0, 0, 0x00000014), (0x45, 6, 0, 0x00001fff), (0xb1, 0, 0, 0x0000000e), (0x48, 0, 0, 0x0000000e),
+    (0x15, 0, 3, 0x00000043), (0x48, 0, 0, 0x00000010), (0x15, 0, 1, 0x00000044), (0x6, 0, 0, 0x00040000),
+    (0x6, 0, 0, 0x00000000)]
+DHCP_CONFLICTS = {}
+
+
+def check_other_dhcp_reply(src, d):
+    opts = parse_options(d)
+    if opts.get(53, b"\x00")[0] not in (2, 5) or d[236:240] != b"\x63\x82\x53\x63":
+        return
+    sid = socket.inet_ntoa(opts[54]) if len(opts.get(54, b"")) == 4 else src
+    if sid == MY_IP:
+        return
+    issues = []
+    if 66 in opts:
+        issues.append(f"opt 66 next-server '{opts[66].decode(errors='replace').strip(chr(0))}'")
+    if 67 in opts:
+        issues.append(f"opt 67 boot file '{opts[67].decode(errors='replace').strip(chr(0))}'")
+    fname = d[108:236].split(b"\0")[0]
+    if fname and 67 not in opts:
+        issues.append(f"boot file '{fname.decode(errors='replace')}'")
+    siaddr = socket.inet_ntoa(d[20:24])
+    if siaddr not in ("0.0.0.0", sid, MY_IP):
+        issues.append(f"next-server (siaddr) {siaddr}")
+    if opts.get(60, b"").startswith(b"PXEClient"):
+        issues.append("another PXE server answers PXE clients (WDS / SCCM / dnsmasq?)" if d[16:20] == b"\0\0\0\0"
+                      else "opt 60 PXEClient in its address offers")
+    if 175 in opts:
+        issues.append("iPXE options (opt 175)")
+    if not issues:
+        return
+    DHCP_CONFLICTS[sid] = {"issues": issues, "seen": time.time()}
+    note_once(("dhcpwatch", sid, tuple(issues)), f"[dhcpwatch] WARNING DHCP server {sid} hands out network-boot settings: "
+              + "; ".join(issues) + " - many PCs then ignore KwickBoot. Remove them from that server (KwickBoot needs "
+              "none), or point them at KwickBoot", every=6 * 3600)
+    try:
+        db.set_setting("dhcp_conflicts", json.dumps(DHCP_CONFLICTS))
+    except Exception:
+        pass
+
+
+def dhcp_watch_loop():
+    import ctypes
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+        s.bind((IFACE, 0))
+        code = b"".join(struct.pack("HBBI", *ins) for ins in _BPF_UDP_67_TO_68)
+        buf = ctypes.create_string_buffer(code, len(code))
+        s.setsockopt(socket.SOL_SOCKET, 26, struct.pack("HL", len(_BPF_UDP_67_TO_68), ctypes.addressof(buf)))   # SO_ATTACH_FILTER
+    except Exception as e:
+        log(f"[dhcpwatch] not watching other DHCP servers ({e!r}) - needs CAP_NET_RAW")
+        return
+    log(f"[dhcpwatch] watching other DHCP servers' replies on {IFACE}")
+    while True:
+        try:
+            pkt = s.recv(4096)
+            ihl = (pkt[14] & 0x0F) * 4
+            src = socket.inet_ntoa(pkt[26:30])
+            d = pkt[14 + ihl + 8:]
+            if src != MY_IP and len(d) >= 240 and d[0] == 2:
+                check_other_dhcp_reply(src, d)
+        except Exception as e:
+            note_once("dhcpwatch-err", f"[dhcpwatch] error {e!r}")
+
+
 # ---------------------------------------------------------------- TFTP
 TFTP_WINDOW_MAX = 32      # RFC 7440: up to this many blocks in flight per acknowledgement (when the client asks)
 
@@ -1639,8 +1791,18 @@ def tftp_send(client, payload, label, opts):
         size = len(payload) if isinstance(payload, bytes) else os.path.getsize(payload)
         blksize, oack, window = 512, {}, 1
         if "blksize" in opts:
-            blksize = max(8, min(int(opts["blksize"]), 1468))
+            # never more than asked; capped below one Ethernet frame AND below 1432: VMware EFI cannot reassemble IP
+            # fragments and breaks above that, routed / tunnelled paths drop 1468 (config "tftp_blksize_max")
+            blksize = max(8, min(int(opts["blksize"]), int(CFG.get("tftp_blksize_max", 1432))))
             oack["blksize"] = str(blksize)
+        if "timeout" in opts:              # RFC 2349: echo it exactly (EDK2 rejects an OACK with another value)
+            try:
+                t = int(opts["timeout"])
+                if 1 <= t <= 255:
+                    oack["timeout"] = str(t)
+                    s.settimeout(min(t, 10))
+            except ValueError:
+                pass
         if "tsize" in opts:
             oack["tsize"] = str(size)
         if "windowsize" in opts:
@@ -1719,6 +1881,37 @@ def tftp_send(client, payload, label, opts):
 GRUB_MAC_PREFIX = "debian-installer/amd64/grub/mac/"
 
 
+def _ci_path(root, rel):
+    """Case-insensitive lookup of rel under root (DOS/Windows-era clients upper-case names); None if absent."""
+    cur = root
+    for part in [x for x in rel.split("/") if x]:
+        try:
+            hit = next((e for e in os.listdir(cur) if e.lower() == part.lower()), None)
+        except OSError:
+            return None
+        if hit is None:
+            return None
+        cur = os.path.join(cur, hit)
+    return cur
+
+
+def tftp_resolve(fname):
+    """Path a TFTP name maps to: exact; else case-insensitive; else the Raspberry Pi tree (tftp/rpi/, the Pi asks for
+    <serial>/start4.elf then start4.elf). Always inside TFTP_ROOT (realpath-checked by the caller)."""
+    full = os.path.realpath(os.path.join(TFTP_ROOT, fname))
+    if os.path.isfile(full):
+        return full
+    cands = [fname]
+    if os.path.isdir(PI_DIR):
+        parts = fname.split("/", 1)
+        cands += ["rpi/" + fname] + (["rpi/" + parts[1]] if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{8}", parts[0]) else [])
+    for c in cands:
+        hit = _ci_path(TFTP_ROOT, c)
+        if hit and os.path.isfile(hit):
+            return os.path.realpath(hit)
+    return full
+
+
 def tftp_loop():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1760,7 +1953,7 @@ def tftp_loop():
             boot_step(mac, "menu")
             threading.Thread(target=tftp_send, args=(client, cfg.encode(), fname, opts), daemon=True).start()
             continue
-        full = os.path.realpath(os.path.join(TFTP_ROOT, fname))
+        full = tftp_resolve(fname)
         if not full.startswith(TFTP_ROOT) or not os.path.isfile(full) or full.endswith(".tmpl"):
             if "revocations" not in fname and "shim_certificate" not in fname:
                 log(f"[tftp] {client[0]} missing: {fname}")
@@ -2742,6 +2935,8 @@ if __name__ == "__main__":
         threading.Thread(target=fed_loop, args=(int(CFG.get("federation_port", 8443)),), daemon=True).start()
     for target, args in ((dhcp_loop, (67,)), (dhcp_loop, (4011,)), (tftp_loop, ()), (http_loop, ()), (firstboot_loop, ())):
         threading.Thread(target=target, args=args, daemon=True).start()
+    if IS_LINUX and IFACE and not own_dhcp_cfg() and CFG.get("dhcp_watch", True):
+        threading.Thread(target=dhcp_watch_loop, daemon=True).start()
     try:
         while True:
             time.sleep(3600)
