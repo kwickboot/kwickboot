@@ -42,7 +42,7 @@ echo "toolkit ready in /root/tk:"; ls /root/tk
 
 # report inventory to the PXE server (saved under machines/<mac>/ on the server)
 pgrep lldpd >/dev/null 2>&1 && sleep 5   # give LLDP a moment to hear the switch
-MAC=$(cat /sys/class/net/$(ip route show default | awk '{print $5; exit}')/address 2>/dev/null)
+KBIF=$(ip route get {{SERVER_IP}} 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$KBIF" ] || KBIF=$(ip route show default 2>/dev/null | awk '{print $5; exit}'); MAC=$(cat /sys/class/net/$KBIF/address 2>/dev/null)
 sh /root/tk/inventory.sh > /root/tk/inventory.txt 2>&1
 TOKEN=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pxetoken=//p')
 curl -s -H "X-PXE-Token: $TOKEN" --data-binary @/root/tk/inventory.txt "http://{{SERVER_IP}}:{{HTTP_PORT}}/report?mac=$MAC" >/dev/null \

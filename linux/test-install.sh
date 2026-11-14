@@ -2,11 +2,15 @@
 # test-install.sh - test a KwickBoot release on a FRESH Debian 13 in an isolated container (build box, as root).
 #   sudo sh test-install.sh <release.tar.gz>
 # The container has a private virtual link only (no LAN: its proxyDHCP can't answer any real PC; no internet:
-# install.sh --offline). Checks: fresh install, service up, console answers, upgrade keeps data, signing key stays 0600.
+# install.sh --offline). Checks: fresh install, service up, console answers, upgrade keeps data, signing key stays 0600,
+# and a UEFI VM (OVMF, on a private bridge) network-boots from the fresh install: shim -> GRUB -> RAM OS agent check-in.
+# KB_PXETEST=0 skips that (it needs qemu-system-x86_64 + ovmf on the build box).
 set -eu
 REL=${1:?release tarball}
 W=/tmp/kbct; M=kbtest
-cleanup() { machinectl terminate $M >/dev/null 2>&1 || true; sleep 1; ip link del ve-$M >/dev/null 2>&1 || true; }
+cleanup() { [ -f /tmp/kbpxe.pid ] && kill "$(cat /tmp/kbpxe.pid)" 2>/dev/null; rm -f /tmp/kbpxe.pid
+  ip link del tap-kbt >/dev/null 2>&1 || true; ip link del br-kbt >/dev/null 2>&1 || true
+  machinectl terminate $M >/dev/null 2>&1 || true; sleep 1; ip link del ve-$M >/dev/null 2>&1 || true; }
 cleanup; rm -rf $W; mkdir -p $W
 echo "== debootstrap Debian 13 (minimal + KwickBoot's runtime packages)"
 debootstrap --variant=minbase --include=systemd-sysv,dbus,iproute2,ca-certificates,curl,procps \
@@ -76,6 +80,44 @@ echo "== FIRST-RUN SETUP CODE (\"default_admin\": false servers) - skipped here:
 run "test -e /opt/pxe-toolkit/data/setup-code && echo 'setup code exists while an admin exists: FAIL' || echo 'no setup code (admin exists): OK'"
 echo "RAM OS kernel served: $(curl -s -o /dev/null -w '%{http_code} %{size_download}' http://10.199.0.2:8080/kbcore/vmlinuz)"
 run "test -d /opt/pxe-toolkit/data && ls /opt/pxe-toolkit/data; systemctl is-active pxe-toolkit"
+if [ "${KB_PXETEST:-1}" = 1 ] && command -v qemu-system-x86_64 >/dev/null && [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+  echo "== NETWORK BOOT (a UEFI PC boots from the fresh install: loaders shipped + served)"
+  # the container's link goes into a private bridge with a tap for the VM - nothing reaches a real network
+  ip link add br-kbt type bridge && ip link set br-kbt up
+  ip addr del 10.199.0.1/24 dev ve-$M 2>/dev/null || true
+  ip link set ve-$M master br-kbt && ip addr add 10.199.0.1/24 dev br-kbt
+  ip tuntap add tap-kbt mode tap && ip link set tap-kbt master br-kbt && ip link set tap-kbt up
+  # an isolated link has no DHCP server: let this test install hand out addresses itself (install.sh --own-dhcp)
+  run "python3 - <<'PY'
+import json
+p = '/opt/pxe-toolkit/config.json'
+c = json.load(open(p))
+c['own_dhcp'] = {'enabled': True, 'range': '10.199.0.100-10.199.0.150', 'lease_s': 600, 'router': '', 'dns': [], 'discover': True}
+json.dump(c, open(p, 'w'), indent=2)
+PY
+systemctl restart pxe-toolkit"
+  sleep 4
+  cp /usr/share/OVMF/OVMF_VARS_4M.fd $W/vars.fd
+  # -cpu host: with QEMU's default CPU model OVMF does not load the NIC's iPXE option ROM -> no PXE, EFI shell
+  qemu-system-x86_64 -enable-kvm -cpu host -machine q35 -m 2048 -no-reboot -display none -monitor none \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=$W/vars.fd \
+    -netdev tap,id=n0,ifname=tap-kbt,script=no,downscript=no -device virtio-net-pci,netdev=n0,mac=52:54:00:4b:4b:01,bootindex=1 \
+    -serial file:$W/pxe-serial.log -daemonize -pidfile /tmp/kbpxe.pid
+  ok=""
+  for i in $(seq 1 60); do
+    run "grep -h 'RAM OS up' /run/kwickboot-logs/pxe-*.log 2>/dev/null | grep -q 52:54:00:4b:4b:01" >/dev/null 2>&1 && { ok=1; break; }
+    sleep 5
+  done
+  run "grep -h -e 52:54:00:4b:4b:01 -e 'tftp. sent' /run/kwickboot-logs/pxe-*.log | grep -v facts | cut -c1-140 | head -14"
+  kill "$(cat /tmp/kbpxe.pid)" 2>/dev/null; rm -f /tmp/kbpxe.pid
+  if [ -n "$ok" ]; then echo "network boot: UEFI VM reached the RAM OS from the fresh install: OK"
+  else echo "FAIL: the UEFI VM did not reach the RAM OS (serial: $(tr -d '\r' < $W/pxe-serial.log | sed 's/\x1b\[[0-9;=]*[A-Za-z]//g' | grep -a -e PXE -e Fetching -e error | head -4 | tr '\n' ' '))"; exit 1; fi
+  ip link set ve-$M nomaster; ip link del tap-kbt; ip link del br-kbt; ip addr add 10.199.0.1/24 dev ve-$M; ip link set ve-$M up
+  run "python3 -c \"import json; p='/opt/pxe-toolkit/config.json'; c=json.load(open(p)); c.pop('own_dhcp', None); json.dump(c, open(p, 'w'), indent=2)\"; systemctl restart pxe-toolkit"
+  sleep 3
+else
+  echo "== NETWORK BOOT skipped (KB_PXETEST=0, or no qemu-system-x86_64 / ovmf on this box) - NOT VERIFIED"
+fi
 echo "== UPGRADE (data must survive, key must stay 0600)"
 run "echo secret > /opt/pxe-toolkit/data/wipe-signing.key && chmod 600 /opt/pxe-toolkit/data/wipe-signing.key && chown pxe:pxe /opt/pxe-toolkit/data/wipe-signing.key && echo '{\"server_ip\":\"10.199.0.2\",\"http_port\":8080,\"allowed_macs\":{\"aa:bb:cc:dd:ee:ff\":\"kept\"}}' > /opt/pxe-toolkit/config.json"
 run "sh /root/rel/$N/install.sh --offline --yes" 2>&1 | grep -E '==>|ERROR' | head

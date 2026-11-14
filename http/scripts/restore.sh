@@ -50,7 +50,7 @@ echo "  OK    table written ($TF, sha256 verified)"
 
 step 4 "partitions"
 rm -f /tmp/kbres.fifo; mkfifo /tmp/kbres.fifo
-IFC=$(ip route show default | awk '{print $5; exit}')
+IFC=$(ip route get {{SERVER_IP}} 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$IFC" ] || IFC=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
 if [ "$MODE" = multicast ]; then
   if [ -n "$PORTBASE" ] && command -v udp-receiver >/dev/null; then echo "  multicast: receiving with the room on portbase $PORTBASE via $IFC"
     sysctl -qw net.core.rmem_max=67108864 net.core.rmem_default=33554432 net.core.netdev_max_backlog=16384 2>/dev/null || true   # no drops at line rate

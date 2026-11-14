@@ -4,7 +4,8 @@
 # KwickBoot Core: tools come as packs, downloaded only when a job or the hardware needs them.
 SRV="http://{{SERVER_IP}}:{{HTTP_PORT}}"
 TK=/root/tk; mkdir -p $TK/jobs
-IFC=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+# the card that reaches the KwickBoot server (not the default route: an isolated lab on KwickBoot's own DHCP has none)
+IFC=$(ip route get {{SERVER_IP}} 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$IFC" ] || IFC=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
 MAC=$(cat /sys/class/net/${IFC:-eth0}/address 2>/dev/null)
 ip4() { ip -4 -o addr show "$IFC" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1; }
 # per-boot secret from the kernel command line; the server refuses agent calls without it

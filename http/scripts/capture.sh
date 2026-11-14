@@ -10,7 +10,7 @@ SRV="http://{{SERVER_IP}}:{{HTTP_PORT}}"
 KB_T0=$(date +%s)
 step() { echo; echo ">>> [$1] $2   (+$(( $(date +%s) - KB_T0 ))s)"; }
 die()  { echo "STOP: $*"; exit 1; }
-hp=${SRV#http://}; MAC=$(cat /sys/class/net/$(ip route show default | awk '{print $5; exit}')/address); TOKEN=$(cat /root/tk/token)
+hp=${SRV#http://}; KBIF=$(ip route get {{SERVER_IP}} 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$KBIF" ] || KBIF=$(ip route show default 2>/dev/null | awk '{print $5; exit}'); MAC=$(cat /sys/class/net/$KBIF/address); TOKEN=$(cat /root/tk/token)
 # send stdin to the server as <file>; prints "<sha256> <bytes>" or fails
 put() { r=$(kbpty "${hp%:*}" "${hp#*:}" "$MAC" "$TOKEN" "$JOB" "put:$1") || { echo "upload of $1 failed: $r" >&2; return 1; }
         echo "$r" | awk '$1=="OK"{print $2, $3}'; }

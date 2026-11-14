@@ -36,7 +36,7 @@ echo "prepared $EDITION.wim: $(du -m "/mnt/kbprep/$EDITION.wim" | cut -f1) MB, e
 want=$(cut -d' ' -f1 "/mnt/kbprep/$EDITION.wim.sha256")
 if [ -n "$JOB" ]; then
   # to the server over plain HTTP (kbpty put: - no SSH cipher on the boot server's CPU); it hashes on arrival
-  hp=${SRV#http://}; MAC=$(cat /sys/class/net/$(ip route show default | awk '{print $5; exit}')/address); TOKEN=$(cat /root/tk/token)
+  hp=${SRV#http://}; KBIF=$(ip route get {{SERVER_IP}} 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$KBIF" ] || KBIF=$(ip route show default 2>/dev/null | awk '{print $5; exit}'); MAC=$(cat /sys/class/net/$KBIF/address); TOKEN=$(cat /root/tk/token)
   t2=$(date +%s)
   r=$(kbpty "${hp%:*}" "${hp#*:}" "$MAC" "$TOKEN" "$JOB" "put:$EDITION.wim" < "/mnt/kbprep/$EDITION.wim") || die "upload failed: $r"
   got=$(echo "$r" | awk '$1=="OK"{print $2}')

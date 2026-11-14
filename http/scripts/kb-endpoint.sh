@@ -9,7 +9,7 @@
 . /etc/kb-endpoint.conf
 URL=${URL:-http://$SERVER}
 epcurl() { if [ -n "$PIN" ]; then curl -sf -k --pinnedpubkey "$PIN" -H "X-KB-EP: $TOKEN" "$@"; else curl -sf -H "X-KB-EP: $TOKEN" "$@"; fi; }
-dev=$(ip route show default 2>/dev/null | awk '{print $5; exit}'); MAC=$(cat /sys/class/net/${dev:-none}/address 2>/dev/null) || exit 0
+dev=$(ip route get "${SERVER%:*}" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1); [ -n "$dev" ] || dev=$(ip route show default 2>/dev/null | awk '{print $5; exit}'); MAC=$(cat /sys/class/net/${dev:-none}/address 2>/dev/null) || exit 0
 result() { epcurl -m 10 --data-binary "$2" "$URL/ep/result?mac=$MAC&id=$1" >/dev/null; }
 # "kb-endpoint report <id> <text>": late result of a long command (update) over the same pinned channel
 if [ "$1" = report ]; then case "$2" in ''|*[!0-9]*) exit 1 ;; esac; result "$2" "$3"; exit; fi
