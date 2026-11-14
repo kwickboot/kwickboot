@@ -152,6 +152,36 @@ def check(S):
     add("cache", "ok" if cache == "active" else "tip", "Package cache", "running" if cache == "active" else "not running",
         "" if cache == "active" else "install with --cache (apt-cacher-ng): Debian/Ubuntu installs then fetch packages at LAN speed")
 
+    # network boot: another DHCP server handing out boot settings silently wins over KwickBoot on many PCs;
+    # firmware quirks KwickBoot adapted to by itself (per-PC PXE reply layout)
+    watch = getattr(S, "DHCP_WATCH", None)
+    if watch is not None:
+        conflicts = S.dhcp_conflicts_current()
+        for c in conflicts:
+            add("netboot", "bad", f"Other DHCP server {c['server']}",
+                "hands out network-boot settings: " + "; ".join(c["issues"]),
+                'Remove these network-boot settings from that server (router: DHCP options 66/67, next-server, boot file; Windows: WDS or the SCCM PXE point) - KwickBoot needs none of them, and many PCs otherwise boot from there or not at all.')
+        if not conflicts:
+            if watch.get("on"):
+                add("netboot", "ok", "Other DHCP servers", "no network-boot settings seen",
+                    "KwickBoot watches the DHCP replies on this network; the site's DHCP server must not hand out boot settings")
+            else:
+                add("netboot", "tip", "Other DHCP servers", "not watched",
+                    "needs CAP_NET_RAW in pxe-toolkit.service" if watch.get("error")
+                    else "off (config dhcp_watch, or KwickBoot's own DHCP is on)")
+        try:
+            learned = S._learned_styles()
+        except Exception:
+            learned = {}
+        if learned:
+            names = {"binl": "WDS-style", "bare": "no menu", "direct": "direct", "menu": "menu"}
+            cnt = {}
+            for st in learned.values():
+                cnt[names.get(st, st)] = cnt.get(names.get(st, st), 0) + 1
+            add("netboot", "ok", "PC firmware quirks",
+                f"{len(learned)} PCs boot with an adapted PXE reply ({', '.join(f'{k} {v}' for k, v in sorted(cnt.items()))})",
+                "KwickBoot adapts its PXE reply to each PC's firmware by itself - nothing to do")
+
     # uptime
     up = float(_read("/proc/uptime", "0").split()[0] or 0)
     add("system", "ok", "Uptime", f"{up / 86400:.1f} days")

@@ -1350,5 +1350,19 @@
  "Browser": "浏览器",
  "Search languages": "搜索语言",
  "Choose your language": "选择您的语言",
- "Change language": "更改语言"
+ "Change language": "更改语言",
+ "Other DHCP server {v}": "其他 DHCP 服务器 {0}",
+ "hands out network-boot settings: {v}": "正在分发网络启动设置：{0}",
+ "Remove these network-boot settings from that server (router: DHCP options 66/67, next-server, boot file; Windows: WDS or the SCCM PXE point) - KwickBoot needs none of them, and many PCs otherwise boot from there or not at all.": "请从那台服务器上删除这些网络启动设置（路由器：DHCP 选项 66/67、next-server、启动文件；Windows：WDS 或 SCCM 的 PXE 分发点）。KwickBoot 不需要其中任何一项；否则很多电脑会从那台服务器启动，或者根本无法启动。",
+ "Other DHCP servers": "其他 DHCP 服务器",
+ "no network-boot settings seen": "未发现网络启动设置",
+ "KwickBoot watches the DHCP replies on this network; the site's DHCP server must not hand out boot settings": "KwickBoot 会监视本网络中的 DHCP 回应；现场的 DHCP 服务器不应分发启动设置",
+ "not watched": "未监视",
+ "needs CAP_NET_RAW in pxe-toolkit.service": "需要在 pxe-toolkit.service 中授予 CAP_NET_RAW 权限",
+ "off (config dhcp_watch, or KwickBoot's own DHCP is on)": "已关闭（config.json 中的 dhcp_watch，或已启用 KwickBoot 自带的 DHCP）",
+ "PC firmware quirks": "电脑固件差异",
+ "{v} PCs boot with an adapted PXE reply ({v})": "{0} 台电脑使用适配后的 PXE 回应启动（{1}）",
+ "KwickBoot adapts its PXE reply to each PC's firmware by itself - nothing to do": "KwickBoot 会根据每台电脑的固件自动调整 PXE 回应，无需任何操作",
+ "Network boot at risk: DHCP server {v} hands out its own boot settings ({v}) - many PCs will ignore KwickBoot.": "网络启动有风险：DHCP 服务器 {0} 正在分发自己的启动设置（{1}），很多电脑会因此忽略 KwickBoot。",
+ "Fix it": "去处理"
 }

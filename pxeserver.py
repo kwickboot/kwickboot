@@ -1714,6 +1714,14 @@ _BPF_UDP_67_TO_68 = [   # tcpdump -dd "ip and udp src port 67 and udp dst port 6
     (0x15, 0, 3, 0x00000043), (0x48, 0, 0, 0x00000010), (0x15, 0, 1, 0x00000044), (0x6, 0, 0, 0x00040000),
     (0x6, 0, 0, 0x00000000)]
 DHCP_CONFLICTS = {}
+DHCP_WATCH = {"on": False, "error": ""}      # for the console: is the watcher running, and why not
+
+
+def dhcp_conflicts_current(max_age=86400):
+    """Other DHCP servers seen handing out network-boot settings in the last day: [{server, issues, seen}]."""
+    now_ = time.time()
+    return [{"server": k, "issues": v.get("issues", []), "seen": v.get("seen", 0)}
+            for k, v in sorted(DHCP_CONFLICTS.items()) if now_ - v.get("seen", 0) < max_age]
 
 
 def check_other_dhcp_reply(src, d):
@@ -1760,8 +1768,14 @@ def dhcp_watch_loop():
         buf = ctypes.create_string_buffer(code, len(code))
         s.setsockopt(socket.SOL_SOCKET, 26, struct.pack("HL", len(_BPF_UDP_67_TO_68), ctypes.addressof(buf)))   # SO_ATTACH_FILTER
     except Exception as e:
+        DHCP_WATCH["error"] = repr(e)
         log(f"[dhcpwatch] not watching other DHCP servers ({e!r}) - needs CAP_NET_RAW")
         return
+    try:                                   # what was seen before a restart (the console keeps showing it for a day)
+        DHCP_CONFLICTS.update(json.loads(db.get_setting("dhcp_conflicts", "{}") or "{}"))
+    except Exception:
+        pass
+    DHCP_WATCH["on"] = True
     log(f"[dhcpwatch] watching other DHCP servers' replies on {IFACE}")
     while True:
         try:

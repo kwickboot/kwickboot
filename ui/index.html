@@ -703,6 +703,12 @@ async function render() {
     const n = ST.sites.find(x => x.id === ST.site);
     page.append(el("div", {class: "banner ok", style: "margin-bottom:14px"}, `Site: ${n ? n.name : ST.site} — actions run on that site's KwickBoot node under its own policies.`));
   }
+  // another DHCP server handing out boot settings breaks network boot for many PCs: say so where admins look first
+  if (!ST.site && ST.ov && (ST.ov.boot_conflicts || []).length && ["machines", "server"].includes(ST.route[0]))
+    for (const c of ST.ov.boot_conflicts)
+      page.append(el("div", {class: "banner bad", style: "margin-bottom:14px"},
+        el("span", {style: "flex:1", text: `Network boot at risk: DHCP server ${c.server} hands out its own boot settings (${c.issues.join("; ")}) - many PCs will ignore KwickBoot.`}),
+        ST.route[0] !== "server" ? el("button", {class: "btn sm", onclick: () => go("#/server")}, "Fix it") : null));
   try { await p.render(page, seq); } catch (e) { if (e.message !== "login required") page.append(el("div", {class: "banner bad", text: e.message})); }
   if (seq === renderSeq) $("#page").replaceChildren(page);
 }

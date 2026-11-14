@@ -1193,6 +1193,7 @@ def handle(h, method, _preauth=False):
                       "discovery_until": int(float(until)) if disc and until and until != "always" else None,
                       "machines": [summary(m) for m in db.machines(ids, unassigned)], "recipes": recipes(),
                       "log": rd(S.LOG, 6000).splitlines()[-25:] if role == "admin" else [],
+                      "boot_conflicts": S.dhcp_conflicts_current() if role == "admin" and hasattr(S, "dhcp_conflicts_current") else [],
                       "terms": {"version": TERMS_VERSION, "notice": TERMS_NOTICE, "url": TERMS_URL,
                                 "accepted": terms_accepted()}})
         return True
