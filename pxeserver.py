@@ -1748,15 +1748,34 @@ def check_other_dhcp_reply(src, d):
     if 175 in opts:
         issues.append("iPXE options (opt 175)")
     if not issues:
+        if sid in DHCP_CONFLICTS:          # it was fixed: its replies are clean now
+            DHCP_CONFLICTS.pop(sid, None)
+            for k in [k for k in _NOTED if isinstance(k, tuple) and k[:2] == ("dhcpwatch", sid)]:
+                _NOTED.pop(k, None)        # warn again at once if it starts handing them out again
+            log(f"[dhcpwatch] DHCP server {sid} no longer hands out network-boot settings - warning cleared")
+            _save_dhcp_conflicts()
         return
     DHCP_CONFLICTS[sid] = {"issues": issues, "seen": time.time()}
     note_once(("dhcpwatch", sid, tuple(issues)), f"[dhcpwatch] WARNING DHCP server {sid} hands out network-boot settings: "
               + "; ".join(issues) + " - many PCs then ignore KwickBoot. Remove them from that server (KwickBoot needs "
               "none), or point them at KwickBoot", every=6 * 3600)
+    _save_dhcp_conflicts()
+
+
+def _save_dhcp_conflicts():
     try:
         db.set_setting("dhcp_conflicts", json.dumps(DHCP_CONFLICTS))
     except Exception:
         pass
+
+
+def dhcp_conflict_dismiss(server):
+    """An admin dismissed the warning (e.g. that server is gone). It comes back if the server is seen doing it again."""
+    hit = DHCP_CONFLICTS.pop(server, None) is not None
+    for k in [k for k in _NOTED if isinstance(k, tuple) and k[:2] == ("dhcpwatch", server)]:
+        _NOTED.pop(k, None)
+    _save_dhcp_conflicts()
+    return hit
 
 
 def dhcp_watch_loop():

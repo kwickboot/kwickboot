@@ -708,7 +708,9 @@ async function render() {
     for (const c of ST.ov.boot_conflicts)
       page.append(el("div", {class: "banner bad", style: "margin-bottom:14px"},
         el("span", {style: "flex:1", text: `Network boot at risk: DHCP server ${c.server} hands out its own boot settings (${c.issues.join("; ")}) - many PCs will ignore KwickBoot.`}),
-        ST.route[0] !== "server" ? el("button", {class: "btn sm", onclick: () => go("#/server")}, "Fix it") : null));
+        ST.route[0] !== "server" ? el("button", {class: "btn sm", onclick: () => go("#/server")}, "How to fix") : null,
+        el("button", {class: "btn sm", title: "Hide this warning (e.g. that server is gone). It clears by itself once the server answers without boot settings, and comes back if it hands them out again.",
+          onclick: async () => { try { await api("/api/admin/server-health", {op: "dismiss_dhcp", server: c.server}); refresh(true); } catch (e) { toast(e.message, "bad"); } }}, "Dismiss")));
   try { await p.render(page, seq); } catch (e) { if (e.message !== "login required") page.append(el("div", {class: "banner bad", text: e.message})); }
   if (seq === renderSeq) $("#page").replaceChildren(page);
 }

@@ -2532,6 +2532,10 @@ def admin_api(h, method, path, who, ip):
                 for d in (os.path.join(S.HTTP_ROOT, "iso"), os.path.join(S.HTTP_ROOT, "images")):
                     if serverhealth.measure_disk(d):
                         break
+            if method == "POST" and op == "dismiss_dhcp":     # admin: forget a DHCP-conflict warning (server gone, etc.)
+                srv = str(a.get("server", ""))[:64]
+                if hasattr(S, "dhcp_conflict_dismiss") and S.dhcp_conflict_dismiss(srv):
+                    audit(who, f"dismissed the network-boot warning about DHCP server {srv}", ip)
             send_json(h, serverhealth.check(S))
             return True
         if path == "/api/admin/departments":

@@ -1364,5 +1364,7 @@
  "{v} PCs boot with an adapted PXE reply ({v})": "{0} 台电脑使用适配后的 PXE 回应启动（{1}）",
  "KwickBoot adapts its PXE reply to each PC's firmware by itself - nothing to do": "KwickBoot 会根据每台电脑的固件自动调整 PXE 回应，无需任何操作",
  "Network boot at risk: DHCP server {v} hands out its own boot settings ({v}) - many PCs will ignore KwickBoot.": "网络启动有风险：DHCP 服务器 {0} 正在分发自己的启动设置（{1}），很多电脑会因此忽略 KwickBoot。",
- "Fix it": "去处理"
+ "How to fix": "查看处理方法",
+ "Dismiss": "忽略",
+ "Hide this warning (e.g. that server is gone). It clears by itself once the server answers without boot settings, and comes back if it hands them out again.": "隐藏这条警告（例如那台服务器已经下线）。那台服务器不再发送启动设置后，警告会自动消失；如果它再次发送，警告会重新出现。"
 }
