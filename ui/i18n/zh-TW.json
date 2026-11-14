@@ -1366,5 +1366,17 @@
  "Network boot at risk: DHCP server {v} hands out its own boot settings ({v}) - many PCs will ignore KwickBoot.": "網路開機有風險：DHCP 伺服器 {0} 正在發送自己的開機設定（{1}），許多電腦會因此忽略 KwickBoot。",
  "How to fix": "查看處理方法",
  "Dismiss": "忽略",
- "Hide this warning (e.g. that server is gone). It clears by itself once the server answers without boot settings, and comes back if it hands them out again.": "隱藏這則警告（例如那台伺服器已下線）。那台伺服器不再發送開機設定後，警告會自動消失；若它再次發送，警告會重新出現。"
+ "Hide this warning (e.g. that server is gone). It clears by itself once the server answers without boot settings, and comes back if it hands them out again.": "隱藏這則警告（例如那台伺服器已下線）。那台伺服器不再發送開機設定後，警告會自動消失；若它再次發送，警告會重新出現。",
+ "Secure Boot ({v})": "安全開機（{0}）",
+ "Secure Boot ({v}) GRUB": "安全開機（{0}）GRUB",
+ "Secure Boot (iPXE)": "安全開機（iPXE）",
+ "{v} - signed by {v} only": "{0} - 僅有簽章：{1}",
+ "{v} - signed by {v}": "{0} - 簽章：{1}",
+ "{v} - UNSIGNED": "{0} - 未簽章",
+ "ipxe.efi is unsigned": "ipxe.efi 未簽章",
+ "GRUB is unsigned": "GRUB 未簽章",
+ "boots with Secure Boot on, on older PCs and on new ones that only trust the 2023 certificate": "開啟安全開機時可以開機：同時支援舊電腦，以及只信任 2023 憑證的新電腦",
+ "used only for iPXE ROMs without HTTP and machines set to chain iPXE: those need Secure Boot off": "只用於不支援 HTTP 的 iPXE 網卡韌體及設為 chain iPXE 的機器：這些機器需要關閉安全開機",
+ "PCs with Secure Boot on refuse it: restore the distribution's signed shim (shim-signed)": "開啟安全開機的電腦會拒絕它：請還原發行版簽章的 shim（shim-signed）",
+ "shim refuses it with Secure Boot on: restore the signed grub": "開啟安全開機時 shim 會拒絕它：請還原已簽章的 grub"
 }

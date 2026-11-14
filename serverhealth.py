@@ -68,6 +68,34 @@ def measure_disk(root):
     return round(mbs)
 
 
+def efi_signature(path):
+    """What Secure Boot sees in a UEFI program: {"signed", "ca2011", "ca2023", "debian", "sbat": {component: version}}.
+    Reads the PE certificate table (Authenticode PKCS#7, certificate names are plain text in it) and the .sbat section."""
+    import struct
+    try:
+        d = open(path, "rb").read()
+        pe = struct.unpack_from("<I", d, 0x3C)[0]
+        if d[pe:pe + 4] != b"PE\0\0":
+            return None
+        ddir = pe + 24 + (112 if struct.unpack_from("<H", d, pe + 24)[0] == 0x20B else 96)
+        off, size = struct.unpack_from("<II", d, ddir + 32)
+        cert = d[off:off + size] if size else b""
+        sbat = {}
+        nsec, optsz = struct.unpack_from("<H", d, pe + 6)[0], struct.unpack_from("<H", d, pe + 20)[0]
+        for i in range(nsec):
+            o = pe + 24 + optsz + 40 * i
+            if d[o:o + 8].rstrip(b"\0") == b".sbat":
+                vsize, _va, rsize, rptr = struct.unpack_from("<IIII", d, o + 8)
+                for line in d[rptr:rptr + min(vsize or rsize, rsize)].split(b"\0")[0].decode(errors="replace").splitlines():
+                    f = line.split(",")
+                    if len(f) >= 5 and f[0] != "sbat":
+                        sbat[f[0]] = f[4]
+        return {"signed": bool(cert), "ca2011": b"Microsoft Corporation UEFI CA 2011" in cert,
+                "ca2023": b"Microsoft UEFI CA 2023" in cert, "debian": b"Debian Secure Boot" in cert, "sbat": sbat}
+    except (OSError, struct.error):
+        return None
+
+
 def check(S):
     items = []
     add = lambda area, level, name, value, advice="": items.append(  # noqa: E731
@@ -181,6 +209,44 @@ def check(S):
             add("netboot", "ok", "PC firmware quirks",
                 f"{len(learned)} PCs boot with an adapted PXE reply ({', '.join(f'{k} {v}' for k, v in sorted(cnt.items()))})",
                 "KwickBoot adapts its PXE reply to each PC's firmware by itself - nothing to do")
+
+    # Secure Boot chain handed to PCs: shim must carry Microsoft's UEFI CA 2011 AND 2023 signatures (PCs shipped from 2026
+    # may trust only the 2023 CA; older ones only 2011), GRUB the distribution's signature with a current SBAT level
+    cfg = getattr(S, "CFG", {}) or {}
+    tftp = getattr(S, "TFTP_ROOT", os.path.join(S.BASE, "tftp"))
+    for arch, key, dflt in (("x64", "boot_file_uefi", "debian-installer/amd64/bootnetx64.efi"),
+                            ("ARM64", "boot_file_uefi_aa64", "debian-installer/arm64/bootnetaa64.efi"),
+                            ("x86 (32-bit)", "boot_file_uefi_ia32", "debian-installer/i386/bootnetia32.efi")):
+        f = os.path.join(tftp, cfg.get(key, dflt))
+        if not os.path.isfile(f):
+            continue
+        sig = efi_signature(f)
+        if not sig:
+            add("secureboot", "warn", f"Secure Boot ({arch})", f"{os.path.basename(f)}: not a UEFI program?", "re-run the KwickBoot update")
+            continue
+        grub = efi_signature(os.path.join(os.path.dirname(f), "grub" + os.path.basename(f)[7:].replace("net", ""))) \
+            if os.path.basename(f).startswith("bootnet") else None
+        ver = f"shim {sig['sbat'].get('shim.debian') or sig['sbat'].get('shim', '?')}" + (
+            f", GRUB {grub['sbat'].get('grub.debian') or grub['sbat'].get('grub', '?')}" if grub else "")
+        cas = " + ".join(n for n, k in (("Microsoft UEFI CA 2011", "ca2011"), ("2023", "ca2023")) if sig[k]) or "no Microsoft signature"
+        if not sig["signed"]:
+            add("secureboot", "bad", f"Secure Boot ({arch})", f"{ver} - UNSIGNED",
+                "PCs with Secure Boot on refuse it: restore the distribution's signed shim (shim-signed)")
+        elif sig["ca2011"] and sig["ca2023"]:
+            add("secureboot", "ok", f"Secure Boot ({arch})", f"{ver} - signed by {cas}",
+                "boots with Secure Boot on, on older PCs and on new ones that only trust the 2023 certificate")
+        else:
+            add("secureboot", "warn", f"Secure Boot ({arch})", f"{ver} - signed by {cas} only",
+                "PCs that only trust the " + ("2023" if sig["ca2011"] else "2011") + " Microsoft certificate refuse it with "
+                "Secure Boot on: update to a shim signed with both (Debian shim-signed 16 or later)")
+        if grub and not grub["signed"]:
+            add("secureboot", "bad", f"Secure Boot ({arch}) GRUB", "GRUB is unsigned", "shim refuses it with Secure Boot on: restore the signed grub")
+    ipxe = os.path.join(tftp, "ipxe", "ipxe.efi")
+    if os.path.isfile(ipxe):
+        sig = efi_signature(ipxe)
+        if sig and not sig["signed"]:
+            add("secureboot", "tip", "Secure Boot (iPXE)", "ipxe.efi is unsigned",
+                "used only for iPXE ROMs without HTTP and machines set to chain iPXE: those need Secure Boot off")
 
     # uptime
     up = float(_read("/proc/uptime", "0").split()[0] or 0)
