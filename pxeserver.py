@@ -1174,10 +1174,15 @@ def parse_options(data):
 
 
 # proxyDHCP OFFER layouts - firmware differs in which one it accepts (HP EliteDesk 800 G3 UEFI only takes "binl"):
-#   menu   = PXE boot-server discovery menu in opt 43 (the long-standing default; EDK2 / Hyper-V / QEMU take it)
+#   menu   = PXE boot-server discovery menu in opt 43 (legacy BIOS default; EDK2 / Hyper-V / QEMU take it too)
 #   binl   = WDS-like: PXEClient only, no file - the PC asks port 4011 and gets the file in the ACK
 #   bare   = no opt 43, boot file in the offer        direct = opt 43 discovery-control 0x08 + boot file in the offe
 OFFER_STYLES = ("menu", "binl", "bare", "direct")
+# Order tried per firmware family. UEFI: binl first - the layout dnsmasq sends every EFI client since 2.76 (UEFI PXE
+# menu handling is broken on many PCs: HP, Dell/Intel, ASUS, VMware EFI); EDK2/OVMF takes all four (tested 14 Nov 2026).
+# Legacy BIOS PXE ROMs handle the menu well, so it stays first there.
+STYLE_ORDER_UEFI = ("binl", "bare", "direct", "menu")
+STYLE_ORDER_BIOS = ("menu", "binl", "bare", "direct")
 _STYLE_TRY = {}          # mac -> (xid, index into OFFER_STYLES) for the DHCP exchange in progress
 _STYLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "offer_styles.json")
 _STYLE_LOCK = threading.Lock()
@@ -1205,26 +1210,28 @@ def _learn_style(mac, style):
     log(f"[dhcp] {mac}: firmware accepts offer style '{style}' - remembered")
 
 
-def offer_style(mac, xid):
+def offer_style(mac, xid, arch=7):
     """Layout of the proxyDHCP OFFER for this PC (see OFFER_STYLES). A re-sent DISCOVER (same xid) means the firmware
-    turned down every offer it got, so it gets the next layout; the one it finally REQUESTs on is remembered."""
+    turned down every offer it got, so it gets the next layout; the one it finally REQUESTs on is remembered.
+    Start: forced (pxe_offer_test) > learned for this PC > pxe_offer_style (config) > first of the family's order."""
+    order = STYLE_ORDER_BIOS if arch == 0 else STYLE_ORDER_UEFI
     forced = (CFG.get("pxe_offer_test") or {}).get(mac)
-    if forced and forced in OFFER_STYLES:
-        _STYLE_TRY[mac] = (xid, OFFER_STYLES.index(forced))
+    if forced and forced in order:
+        _STYLE_TRY[mac] = (xid, order, order.index(forced))
         return forced
-    learned = _learned_styles().get(mac) or CFG.get("pxe_offer_style", "menu")
-    start = OFFER_STYLES.index(learned) if learned in OFFER_STYLES else 0
+    start_style = _learned_styles().get(mac) or CFG.get("pxe_offer_style") or order[0]
+    start = order.index(start_style) if start_style in order else 0
     prev = _STYLE_TRY.get(mac)
-    i = (prev[1] + 1) % len(OFFER_STYLES) if prev and prev[0] == xid else start
-    _STYLE_TRY[mac] = (xid, i)
-    return OFFER_STYLES[i]
+    i = (prev[2] + 1) % len(order) if prev and prev[0] == xid and prev[1] == order else start
+    _STYLE_TRY[mac] = (xid, order, i)
+    return order[i]
 
 
 def offer_style_accepted(mac, xid):
     """The PC sent its DHCP REQUEST: it took the offers of this exchange -> remember the layout it last got."""
     prev = _STYLE_TRY.get(mac)
     if prev and prev[0] == xid:
-        _learn_style(mac, OFFER_STYLES[prev[1]])
+        _learn_style(mac, prev[1][prev[2]])
 
 
 def build_reply(req, opts, msg_type, boot_file, http=False, style="menu"):
@@ -1576,12 +1583,12 @@ def handle_dhcp(sock, data, addr, port):
     is_ipxe = opts.get(77, b"") == b"iPXE"
     boot = boot_file_for(mac, arch, is_ipxe, is_http)
     if mtype == 1:
-        style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]))
+        style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]), arch)
         reply = build_reply(data, opts, 2, boot, is_http, style)
         for dst in ("255.255.255.255", MY_IP.rsplit(".", 1)[0] + ".255"):
             sock.sendto(reply, (dst, 68))
         log(f"[dhcp:{port}] OFFER {mac} ({m.get('name')}) arch={arch}{' HTTP' if is_http else ' iPXE' if is_ipxe else ''} file={boot}"
-            + (f" style={style}" if style != "menu" else ""))
+            + ("" if (is_http or is_ipxe or is_uboot) else f" style={style}"))
         boot_step(mac, "dhcp", ("HTTP" if is_http else "iPXE" if is_ipxe else "UEFI" if arch in (6, 7, 9, 10, 11) else "BIOS"))
     elif mtype == 3 and port == 67 and not (is_http or is_ipxe or is_uboot):
         offer_style_accepted(mac, bytes(data[4:8]))      # the PC's DHCP REQUEST (to whichever DHCP server it chose)
