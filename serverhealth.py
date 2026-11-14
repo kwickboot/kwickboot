@@ -202,12 +202,14 @@ def check(S):
         except Exception:
             learned = {}
         if learned:
-            names = {"binl": "WDS-style", "bare": "no menu", "direct": "direct", "menu": "menu"}
+            names = {"binl": "WDS-style", "bare": "no menu", "direct": "direct", "menu": "menu",
+                     "ipxe/undionly.kpxe": "BIOS undionly", "ipxe/undionly.kkpxe": "BIOS undionly.kkpxe",
+                     "ipxe/ipxe.pxe": "BIOS native-driver iPXE"}
             cnt = {}
             for st in learned.values():
                 cnt[names.get(st, st)] = cnt.get(names.get(st, st), 0) + 1
             add("netboot", "ok", "PC firmware quirks",
-                f"{len(learned)} PCs boot with an adapted PXE reply ({', '.join(f'{k} {v}' for k, v in sorted(cnt.items()))})",
+                f"{len({k.split('|')[0] for k in learned})} PCs boot with an adapted PXE reply ({', '.join(f'{k} {v}' for k, v in sorted(cnt.items()))})",
                 "KwickBoot adapts its PXE reply to each PC's firmware by itself - nothing to do")
 
     # Secure Boot chain handed to PCs: shim must carry Microsoft's UEFI CA 2011 AND 2023 signatures (PCs shipped from 2026

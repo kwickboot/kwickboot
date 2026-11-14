@@ -84,7 +84,7 @@ def main():
         sys.exit(__doc__)
     out = os.path.abspath(sys.argv[1])
     suite = sys.argv[sys.argv.index("--suite") + 1] if "--suite" in sys.argv else "trixie"
-    report = []
+    report, amd64_pkgs = [], {}
     for kdir, debarch, plat, sfx, http_copy in ARCHES:
         pkgs = {}
         for host, s in MIRRORS:
@@ -122,6 +122,25 @@ def main():
         report.append(f"{kdir}: {signed['Package']} {signed['Version']} ({signed['_suite']}, deb sha256 {h1[:16]}) + "
                       f"{binp['Package']} {binp['Version']} ({n} modules, deb sha256 {h2[:16]}); grub{sfx}.efi sha256 {sha}")
         print(report[-1])
+        if debarch == "amd64":
+            amd64_pkgs = pkgs
+    # iPXE (Debian "ipxe", arch all): the legacy-BIOS loaders - undionly.kpxe (default: drives the NIC through its PXE ROM's
+    # UNDI), undionly.kkpxe (keeps the ROM's PXE stack - for ROMs that break when it is unloaded), ipxe.pxe (iPXE's own
+    # native NIC drivers - for ROMs with a broken UNDI, e.g. old 3Com MBA / Realtek / Broadcom); + ipxe.efi (unsigned)
+    ip = newest(amd64_pkgs, "ipxe")
+    if not ip:
+        sys.exit(f"{suite}: no ipxe package")
+    with tempfile.TemporaryDirectory() as x:
+        h = fetch_deb(ip, x)
+        src = os.path.join(x, "usr/lib/ipxe")
+        d = os.path.join(out, "tftp/ipxe")
+        os.makedirs(d, exist_ok=True)
+        for f, dst in (("undionly.kpxe", "undionly.kpxe"), ("undionly.kkpxe", "undionly.kkpxe"), ("ipxe.pxe", "ipxe.pxe"),
+                       ("ipxe-amd64.efi", "ipxe.efi")):
+            shutil.copy2(os.path.realpath(os.path.join(src, f)), os.path.join(d, dst))
+        open(os.path.join(d, "SOURCE.txt"), "w").write(f"Debian ipxe {ip['Version']} (Debian archive, apt-verified)\n")
+    report.append(f"ipxe: {ip['Package']} {ip['Version']} ({ip['_suite']}, deb sha256 {h[:16]}): undionly.kpxe undionly.kkpxe ipxe.pxe ipxe.efi")
+    print(report[-1])
     open(os.path.join(out, "LOADERS.txt"), "w").write("\n".join(report) + "\n")
 
 

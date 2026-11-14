@@ -1509,6 +1509,59 @@ def job_tick(mac, jid, text):
 
 _IPXE_CHAINED = {}
 
+# Legacy-BIOS PXE ROMs differ in UNDI quality. iPXE's loaders, tried in this order per PC:
+#   undionly.kpxe  drives the NIC through the ROM's UNDI (smallest, works on most ROMs)
+#   undionly.kkpxe keeps the ROM's PXE stack loaded (ROMs that break when it is unloaded)
+#   ipxe.pxe       iPXE's own native NIC drivers - no UNDI at all (old 3Com MBA, Realtek, Broadcom, VIA ROMs with broken UNDI)
+# A loader that was downloaded but whose iPXE never came back (no iPXE DHCP from that PC) gets the next one at the PC's next
+# boot; the one whose iPXE comes back is remembered (data/offer_styles.json, key "<mac>|bios").
+BIOS_LOADERS = ("ipxe/undionly.kpxe", "ipxe/undionly.kkpxe", "ipxe/ipxe.pxe")
+_BIOS_TRY = {}      # mac -> {"xid", "i", "at", "fetched", "back"}
+
+
+def bios_loaders():
+    first = CFG.get("boot_file_bios", "ipxe/undionly.kpxe")
+    order = [first] + [x for x in BIOS_LOADERS if x != first]
+    return [x for x in order if os.path.isfile(os.path.join(TFTP_ROOT, x))] or [first]
+
+
+def bios_loader_pick(mac, xid):
+    """Loader for this BIOS PC's DISCOVER (a re-sent DISCOVER, same xid, gets the same one)."""
+    order = bios_loaders()
+    st = _BIOS_TRY.get(mac)
+    if st and st["xid"] == xid:
+        return order[st["i"] % len(order)]
+    learned = _learned_styles().get(mac + "|bios")
+    i = order.index(learned) if learned in order else 0
+    if st and st["fetched"] and not st["back"] and time.time() - st["at"] < 1800:
+        i = (st["i"] + 1) % len(order)
+        log(f"[dhcp] {mac}: {os.path.basename(order[st['i'] % len(order)])} was loaded but iPXE never came back - "
+            f"trying {os.path.basename(order[i])}")
+    _BIOS_TRY[mac] = {"xid": xid, "i": i, "at": time.time(), "fetched": False, "back": False}
+    return order[i]
+
+
+def bios_loader_current(mac):
+    st = _BIOS_TRY.get(mac)
+    order = bios_loaders()
+    return order[st["i"] % len(order)] if st else order[0]
+
+
+def bios_loader_fetched(mac):
+    if mac in _BIOS_TRY:
+        _BIOS_TRY[mac]["fetched"] = True
+
+
+def bios_loader_back(mac):
+    """iPXE from this BIOS PC asked for an address: the loader it got works - remember it."""
+    st = _BIOS_TRY.get(mac)
+    if st and not st["back"]:
+        st["back"] = True
+        order = bios_loaders()
+        loader = order[st["i"] % len(order)]
+        if _learned_styles().get(mac + "|bios") != loader and (st["i"] or mac + "|bios" in _learned_styles()):
+            _learn_style(mac + "|bios", loader)
+
 
 def boot_file_for(mac, arch, is_ipxe, is_http=False, ipxe_http=True):
     # DHCP option 93 (client system architecture) picks the right network boot program:
@@ -1703,6 +1756,10 @@ def handle_dhcp(sock, data, addr, port):
         return
     feats = ipxe_features(opts) if is_ipxe else {}
     boot = boot_file_for(mac, arch, is_ipxe, is_http, ipxe_http=(not feats) or (19 in feats))
+    if arch == 0 and not (is_ipxe or is_http or is_uboot) and boot == CFG.get("boot_file_bios", "ipxe/undionly.kpxe"):
+        boot = bios_loader_pick(mac, bytes(data[4:8])) if mtype == 1 else bios_loader_current(mac)
+    if is_ipxe and arch == 0 and mtype == 1:
+        bios_loader_back(mac)
     if mtype == 1:
         style = "menu" if (is_http or is_ipxe or is_uboot) else offer_style(mac, bytes(data[4:8]), arch)
         via = send_offer(sock, data, build_reply(data, opts, 2, boot, is_http, style))
@@ -2080,8 +2137,11 @@ def tftp_loop():
                 log(f"[tftp] {client[0]} missing: {fname}")
             s.sendto(struct.pack("!HH", 5, 1) + b"File not found\0", client)
             continue
-        if fname.endswith((".efi", ".kpxe", ".0")):          # repeats (size probe + transfer) are merged by boot_step
-            boot_step(IP2MAC.get(client[0]), "loader", os.path.basename(fname))
+        if fname.endswith((".efi", ".kpxe", ".kkpxe", ".pxe", ".0")):   # repeats (size probe + transfer) merged by boot_step
+            lm = IP2MAC.get(client[0]) or mac_for_ip(client[0])
+            boot_step(lm, "loader", os.path.basename(fname))
+            if fname.endswith((".kpxe", ".kkpxe", ".pxe")):
+                bios_loader_fetched(lm)
         threading.Thread(target=tftp_send, args=(client, full, os.path.relpath(full, TFTP_ROOT), opts), daemon=True).start()
 
 
